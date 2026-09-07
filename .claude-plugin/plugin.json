@@ -1,0 +1,14 @@
+{
+  "name": "crableton",
+  "description": "Drive Ableton Live from Claude Code: tracks, clips, notes, devices, arrangement and automation.",
+  "version": "0.1.0",
+  "author": { "name": "Thomas Murphy" },
+  "keywords": ["ableton", "live", "music", "midi", "daw"],
+  "mcpServers": {
+    "crableton": {
+      "command": "crableton",
+      "args": ["serve"],
+      "env": {}
+    }
+  }
+}

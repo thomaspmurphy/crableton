@@ -1,0 +1,498 @@
+{
+  "version": "Live 12",
+  "note": "Condensed reference to Ableton's Live Object Model — the API a MIDI Remote Script can reach. Covers the members crableton uses or that are useful for reasoning about what Live can do; it is not the complete model, and availability varies by Live version and edition. Members marked read-only cannot be changed by any tool, however the request is phrased.",
+  "classes": [
+    {
+      "name": "Application",
+      "path": "live_app",
+      "description": "The running Live instance.",
+      "properties": [
+        { "name": "get_major_version", "type": "int", "access": "read-only", "description": "Major version number, e.g. 12." },
+        { "name": "get_minor_version", "type": "int", "access": "read-only", "description": "Minor version number." },
+        { "name": "get_bugfix_version", "type": "int", "access": "read-only", "description": "Patch version number." }
+      ],
+      "children": [
+        { "name": "browser", "type": "Browser", "description": "Live's browser." },
+        { "name": "view", "type": "Application.View", "description": "The main window's view state." }
+      ],
+      "methods": [
+        { "name": "get_document()", "type": "Song", "description": "The open Live set." }
+      ]
+    },
+    {
+      "name": "Application.View",
+      "path": "live_app_view",
+      "description": "Which part of Live's interface is visible and focused.",
+      "properties": [
+        { "name": "focused_document_view", "type": "string", "access": "read-only", "description": "\"Session\" or \"Arranger\"." }
+      ],
+      "methods": [
+        { "name": "show_view(name)", "description": "Show a named view: \"Browser\", \"Arranger\", \"Session\", \"Detail\", \"Detail/Clip\", \"Detail/DeviceChain\"." },
+        { "name": "hide_view(name)", "description": "Hide a named view." },
+        { "name": "is_view_visible(name)", "type": "bool", "description": "Whether a named view is currently shown." },
+        { "name": "focus_view(name)", "description": "Move keyboard focus to a named view." }
+      ]
+    },
+    {
+      "name": "Song",
+      "path": "live_set",
+      "description": "The open Live set: transport, tempo, tracks, scenes and locators. The root of almost everything.",
+      "properties": [
+        { "name": "tempo", "type": "float", "access": "read/write", "description": "Beats per minute, 20.0 to 999.0." },
+        { "name": "is_playing", "type": "bool", "access": "read/write", "description": "Whether the transport is running." },
+        { "name": "current_song_time", "type": "float", "access": "read/write", "description": "Playhead position in beats. Writing it is not guaranteed to take effect within the same tick — anything that depends on the new position must run on a later tick." },
+        { "name": "signature_numerator", "type": "int", "access": "read/write", "description": "Beats per bar." },
+        { "name": "signature_denominator", "type": "int", "access": "read/write", "description": "Beat unit: 1, 2, 4, 8, 16, 32 or 64." },
+        { "name": "metronome", "type": "bool", "access": "read/write", "description": "Click on or off." },
+        { "name": "record_mode", "type": "bool", "access": "read/write", "description": "Arrangement record arm." },
+        { "name": "session_record", "type": "bool", "access": "read/write", "description": "Session record arm." },
+        { "name": "arrangement_overdub", "type": "bool", "access": "read/write", "description": "Overdub rather than replace when recording into the Arrangement." },
+        { "name": "session_automation_record", "type": "bool", "access": "read/write", "description": "Capture automation while Session recording." },
+        { "name": "loop", "type": "bool", "access": "read/write", "description": "Whether the Arrangement loop is active." },
+        { "name": "loop_start", "type": "float", "access": "read/write", "description": "Loop start in beats." },
+        { "name": "loop_length", "type": "float", "access": "read/write", "description": "Loop length in beats." },
+        { "name": "punch_in", "type": "bool", "access": "read/write", "description": "Punch in at the loop start." },
+        { "name": "punch_out", "type": "bool", "access": "read/write", "description": "Punch out at the loop end." },
+        { "name": "clip_trigger_quantization", "type": "Quantization enum", "access": "read/write", "description": "Global launch quantization. 0 is none; the values run through bars down to 1/32." },
+        { "name": "midi_recording_quantization", "type": "RecordingQuantization enum", "access": "read/write", "description": "Quantization applied to newly recorded MIDI." },
+        { "name": "groove_amount", "type": "float", "access": "read/write", "description": "Global groove intensity, 0.0 to 1.0." },
+        { "name": "back_to_arranger", "type": "bool", "access": "read/write", "description": "True when Session clips have overridden Arrangement playback. Set false to hand control back to the Arrangement." },
+        { "name": "root_note", "type": "int", "access": "read/write", "description": "Live 12: set root note, 0 (C) to 11 (B)." },
+        { "name": "scale_name", "type": "string", "access": "read/write", "description": "Live 12: scale name, e.g. \"Major\", \"Minor\", \"Dorian\"." },
+        { "name": "scale_mode", "type": "bool", "access": "read/write", "description": "Live 12: whether scale highlighting is on." },
+        { "name": "can_undo", "type": "bool", "access": "read-only", "description": "Whether there is anything to undo." },
+        { "name": "can_redo", "type": "bool", "access": "read-only", "description": "Whether there is anything to redo." },
+        { "name": "song_length", "type": "float", "access": "read-only", "description": "Length of the Arrangement in beats." },
+        { "name": "is_counting_in", "type": "bool", "access": "read-only", "description": "Whether Live is playing a count-in." }
+      ],
+      "children": [
+        { "name": "tracks", "type": "Track list", "description": "Regular tracks, in Session order." },
+        { "name": "return_tracks", "type": "Track list", "description": "Return tracks." },
+        { "name": "master_track", "type": "Track", "description": "The master track." },
+        { "name": "scenes", "type": "Scene list", "description": "Scenes, in order." },
+        { "name": "cue_points", "type": "CuePoint list", "description": "Arrangement locators, ordered by time." },
+        { "name": "visible_tracks", "type": "Track list", "description": "Tracks not hidden inside a folded group." },
+        { "name": "view", "type": "Song.View", "description": "Selection and view state for the set." }
+      ],
+      "methods": [
+        { "name": "start_playing()", "description": "Start the transport from the start marker." },
+        { "name": "stop_playing()", "description": "Stop the transport." },
+        { "name": "continue_playing()", "description": "Resume from where playback last stopped." },
+        { "name": "stop_all_clips()", "description": "Stop every playing Session clip." },
+        { "name": "create_midi_track(index)", "description": "Insert a MIDI track. -1 appends." },
+        { "name": "create_audio_track(index)", "description": "Insert an audio track. -1 appends." },
+        { "name": "create_return_track()", "description": "Append a return track." },
+        { "name": "delete_track(index)", "description": "Delete a regular track." },
+        { "name": "delete_return_track(index)", "description": "Delete a return track." },
+        { "name": "duplicate_track(index)", "description": "Duplicate a track with its devices and clips." },
+        { "name": "create_scene(index)", "description": "Insert a scene. -1 appends." },
+        { "name": "delete_scene(index)", "description": "Delete a scene and its clips." },
+        { "name": "duplicate_scene(index)", "description": "Duplicate a scene." },
+        { "name": "capture_and_insert_scene()", "description": "Capture what is playing into a new scene." },
+        { "name": "capture_midi()", "description": "Capture recently played MIDI into a clip." },
+        { "name": "set_or_delete_cue()", "description": "Toggle a locator at the current playhead position. There is no API to create one at an arbitrary time — you must move the playhead first, on an earlier tick." },
+        { "name": "jump_to_next_cue()", "description": "Move the playhead to the next locator." },
+        { "name": "jump_to_prev_cue()", "description": "Move the playhead to the previous locator." },
+        { "name": "jump_by(beats)", "description": "Move the playhead relative to its current position." },
+        { "name": "tap_tempo()", "description": "Tap the tempo control once." },
+        { "name": "undo()", "description": "Undo the last change, including the user's own." },
+        { "name": "redo()", "description": "Redo the last undone change." },
+        { "name": "get_current_beats_song_time()", "type": "Beats", "description": "Playhead position as bars, beats, sixteenths and ticks." }
+      ]
+    },
+    {
+      "name": "Song.View",
+      "path": "live_set view",
+      "description": "What is selected and shown in the open set.",
+      "properties": [
+        { "name": "selected_track", "type": "Track", "access": "read/write", "description": "The highlighted track." },
+        { "name": "selected_scene", "type": "Scene", "access": "read/write", "description": "The highlighted scene." },
+        { "name": "detail_clip", "type": "Clip", "access": "read/write", "description": "The clip shown in the detail view." },
+        { "name": "highlighted_clip_slot", "type": "ClipSlot", "access": "read/write", "description": "The focused clip slot." },
+        { "name": "draw_mode", "type": "bool", "access": "read/write", "description": "Whether the pencil tool is active." },
+        { "name": "follow_song", "type": "bool", "access": "read/write", "description": "Whether the view scrolls with the playhead." }
+      ],
+      "methods": [
+        { "name": "select_device(device)", "description": "Select a device, opening its chain in the detail view." }
+      ]
+    },
+    {
+      "name": "Track",
+      "path": "live_set tracks N",
+      "description": "A track: MIDI, audio, return, master or group. Which members apply depends on the kind.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "Track name." },
+        { "name": "color", "type": "int", "access": "read/write", "description": "Colour as 0xRRGGBB." },
+        { "name": "color_index", "type": "int", "access": "read/write", "description": "Index into Live's track colour palette." },
+        { "name": "mute", "type": "bool", "access": "read/write", "description": "Muted state." },
+        { "name": "solo", "type": "bool", "access": "read/write", "description": "Soloed state." },
+        { "name": "arm", "type": "bool", "access": "read/write", "description": "Record arm. Absent on return, master and group tracks." },
+        { "name": "can_be_armed", "type": "bool", "access": "read-only", "description": "Whether `arm` exists on this track." },
+        { "name": "has_midi_input", "type": "bool", "access": "read-only", "description": "True for MIDI tracks." },
+        { "name": "has_audio_input", "type": "bool", "access": "read-only", "description": "True for audio tracks." },
+        { "name": "has_audio_output", "type": "bool", "access": "read-only", "description": "Whether the track outputs audio." },
+        { "name": "is_foldable", "type": "bool", "access": "read-only", "description": "True for group tracks." },
+        { "name": "fold_state", "type": "bool", "access": "read/write", "description": "Whether a group track is collapsed." },
+        { "name": "is_grouped", "type": "bool", "access": "read-only", "description": "Whether the track sits inside a group." },
+        { "name": "group_track", "type": "Track", "access": "read-only", "description": "The containing group track, if any." },
+        { "name": "is_visible", "type": "bool", "access": "read-only", "description": "False when hidden inside a folded group." },
+        { "name": "playing_slot_index", "type": "int", "access": "read-only", "description": "Index of the currently playing Session clip, or -1." },
+        { "name": "fired_slot_index", "type": "int", "access": "read-only", "description": "Index of a slot waiting to launch, or -1." },
+        { "name": "current_monitoring_state", "type": "int", "access": "read/write", "description": "0 = In, 1 = Auto, 2 = Off." },
+        { "name": "input_routing_type", "type": "RoutingType", "access": "read/write", "description": "Input source. Assign an object from `available_input_routing_types`, not a string." },
+        { "name": "input_routing_channel", "type": "RoutingChannel", "access": "read/write", "description": "Channel within the input source." },
+        { "name": "output_routing_type", "type": "RoutingType", "access": "read/write", "description": "Output destination." },
+        { "name": "output_routing_channel", "type": "RoutingChannel", "access": "read/write", "description": "Channel within the output destination." },
+        { "name": "available_input_routing_types", "type": "RoutingType list", "access": "read-only", "description": "What this track's input can be set to, given the set and the machine's hardware." },
+        { "name": "available_output_routing_types", "type": "RoutingType list", "access": "read-only", "description": "What this track's output can be set to." },
+        { "name": "is_frozen", "type": "bool", "access": "read-only", "description": "Whether the track is frozen. Freezing cannot be triggered from the API." }
+      ],
+      "children": [
+        { "name": "clip_slots", "type": "ClipSlot list", "description": "Session clip slots, one per scene." },
+        { "name": "arrangement_clips", "type": "Clip list", "description": "Clips on the Arrangement timeline, ordered by start time." },
+        { "name": "devices", "type": "Device list", "description": "The track's device chain." },
+        { "name": "mixer_device", "type": "MixerDevice", "description": "Volume, pan, sends and crossfader assignment." },
+        { "name": "view", "type": "Track.View", "description": "The track's view state." }
+      ],
+      "methods": [
+        { "name": "stop_all_clips()", "description": "Stop this track's playing Session clip." },
+        { "name": "duplicate_clip_to_arrangement(clip, time)", "type": "Clip", "description": "Copy a clip onto this track's Arrangement timeline at a beat position." },
+        { "name": "delete_clip(clip)", "description": "Delete one of this track's Arrangement clips." },
+        { "name": "delete_device(index)", "description": "Remove a device from the chain." }
+      ]
+    },
+    {
+      "name": "Track.View",
+      "path": "live_set tracks N view",
+      "description": "View state for one track.",
+      "properties": [
+        { "name": "selected_device", "type": "Device", "access": "read/write", "description": "The device shown in the detail view." },
+        { "name": "is_collapsed", "type": "bool", "access": "read/write", "description": "Whether the track is collapsed in the Arrangement." }
+      ],
+      "methods": [
+        { "name": "select_instrument()", "type": "bool", "description": "Select the track's instrument, if it has one." }
+      ]
+    },
+    {
+      "name": "MixerDevice",
+      "path": "live_set tracks N mixer_device",
+      "description": "A track's mixer strip. Every control here is a DeviceParameter, so each can be automated in a clip.",
+      "children": [
+        { "name": "volume", "type": "DeviceParameter", "description": "Fader, 0.0 to 1.0. 0.85 is unity (0 dB); the scale is not linear in decibels." },
+        { "name": "panning", "type": "DeviceParameter", "description": "-1.0 hard left to 1.0 hard right." },
+        { "name": "sends", "type": "DeviceParameter list", "description": "One per return track, in order: index 0 is Send A." },
+        { "name": "track_activator", "type": "DeviceParameter", "description": "The track on/off switch, as an automatable parameter." },
+        { "name": "cue_volume", "type": "DeviceParameter", "description": "Master track only: the cue/headphone level." },
+        { "name": "crossfader", "type": "DeviceParameter", "description": "Master track only: the crossfader position." }
+      ],
+      "properties": [
+        { "name": "crossfade_assign", "type": "int", "access": "read/write", "description": "0 = A, 1 = None, 2 = B." },
+        { "name": "panning_mode", "type": "int", "access": "read/write", "description": "0 = stereo pan, 1 = split stereo." }
+      ]
+    },
+    {
+      "name": "ClipSlot",
+      "path": "live_set tracks N clip_slots M",
+      "description": "One cell of the Session grid. It exists whether or not it holds a clip.",
+      "properties": [
+        { "name": "has_clip", "type": "bool", "access": "read-only", "description": "Whether the slot holds a clip." },
+        { "name": "is_playing", "type": "bool", "access": "read-only", "description": "Whether its clip is playing." },
+        { "name": "is_triggered", "type": "bool", "access": "read-only", "description": "Whether its clip is waiting to launch." },
+        { "name": "is_group_slot", "type": "bool", "access": "read-only", "description": "True for the slot row of a group track." },
+        { "name": "controls_other_clips", "type": "bool", "access": "read-only", "description": "Whether launching this slot launches clips on grouped tracks." }
+      ],
+      "children": [
+        { "name": "clip", "type": "Clip", "description": "The clip in this slot, or nothing." }
+      ],
+      "methods": [
+        { "name": "create_clip(length)", "description": "Create an empty MIDI clip of the given length in beats. Fails if the slot is occupied or the track is not a MIDI track." },
+        { "name": "create_audio_clip(path)", "description": "Import an audio file into this slot. Live 12.0.5 and newer, audio tracks only." },
+        { "name": "delete_clip()", "description": "Delete the clip in this slot." },
+        { "name": "duplicate_clip_to(target_slot)", "description": "Copy this slot's clip into another slot." },
+        { "name": "fire()", "description": "Launch the clip." },
+        { "name": "stop()", "description": "Stop the clip." },
+        { "name": "set_fire_button_state(state)", "description": "Hold or release the launch button, for gate and repeat launch modes." }
+      ]
+    },
+    {
+      "name": "Clip",
+      "path": "live_set tracks N clip_slots M clip",
+      "description": "A MIDI or audio clip, in either the Session or the Arrangement. Times are in beats relative to the clip's own origin.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "Clip name." },
+        { "name": "color", "type": "int", "access": "read/write", "description": "Colour as 0xRRGGBB." },
+        { "name": "is_midi_clip", "type": "bool", "access": "read-only", "description": "True for MIDI clips." },
+        { "name": "is_audio_clip", "type": "bool", "access": "read-only", "description": "True for audio clips." },
+        { "name": "is_arrangement_clip", "type": "bool", "access": "read-only", "description": "True when the clip lives on the Arrangement timeline." },
+        { "name": "length", "type": "float", "access": "read-only", "description": "Playing length in beats, derived from the markers and loop." },
+        { "name": "looping", "type": "bool", "access": "read/write", "description": "Whether the clip loops." },
+        { "name": "loop_start", "type": "float", "access": "read/write", "description": "Loop start in beats." },
+        { "name": "loop_end", "type": "float", "access": "read/write", "description": "Loop end in beats. Must exceed loop_start." },
+        { "name": "start_marker", "type": "float", "access": "read/write", "description": "Playback start marker." },
+        { "name": "end_marker", "type": "float", "access": "read/write", "description": "Playback end marker." },
+        { "name": "start_time", "type": "float", "access": "read-only", "description": "Arrangement clips: position on the timeline. There is no API to move a clip — delete it and re-place it instead." },
+        { "name": "end_time", "type": "float", "access": "read-only", "description": "Arrangement clips: where the clip ends on the timeline." },
+        { "name": "muted", "type": "bool", "access": "read/write", "description": "Whether the clip is deactivated." },
+        { "name": "signature_numerator", "type": "int", "access": "read/write", "description": "Clip time signature: beats per bar." },
+        { "name": "signature_denominator", "type": "int", "access": "read/write", "description": "Clip time signature: beat unit." },
+        { "name": "launch_mode", "type": "int", "access": "read/write", "description": "0 = Trigger, 1 = Gate, 2 = Toggle, 3 = Repeat." },
+        { "name": "launch_quantization", "type": "int", "access": "read/write", "description": "Per-clip launch quantization; 0 follows the set's global setting." },
+        { "name": "legato", "type": "bool", "access": "read/write", "description": "Launch in legato mode." },
+        { "name": "velocity_amount", "type": "float", "access": "read/write", "description": "How much launch velocity affects the clip." },
+        { "name": "follow_action_enabled", "type": "bool", "access": "read/write", "description": "Whether the clip triggers a follow action." },
+        { "name": "follow_time", "type": "float", "access": "read/write", "description": "Beats before the follow action fires." },
+        { "name": "follow_action_a", "type": "int", "access": "read/write", "description": "First follow action." },
+        { "name": "follow_action_b", "type": "int", "access": "read/write", "description": "Second follow action." },
+        { "name": "follow_action_chance_a", "type": "int", "access": "read/write", "description": "Relative weight of the first action." },
+        { "name": "follow_action_chance_b", "type": "int", "access": "read/write", "description": "Relative weight of the second action." },
+        { "name": "warping", "type": "bool", "access": "read/write", "description": "Audio clips: whether the clip follows the set tempo." },
+        { "name": "warp_mode", "type": "int", "access": "read/write", "description": "Audio clips: 0 Beats, 1 Tones, 2 Texture, 3 Re-Pitch, 4 Complex, 6 Complex Pro." },
+        { "name": "gain", "type": "float", "access": "read/write", "description": "Audio clips: clip gain, 0.0 to 1.0, where roughly 0.4 is unity." },
+        { "name": "pitch_coarse", "type": "int", "access": "read/write", "description": "Audio clips: transposition in semitones, -48 to 48." },
+        { "name": "pitch_fine", "type": "float", "access": "read/write", "description": "Audio clips: fine tuning in cents, -50 to 50." },
+        { "name": "ram_mode", "type": "bool", "access": "read/write", "description": "Audio clips: load the sample into RAM." },
+        { "name": "file_path", "type": "string", "access": "read-only", "description": "Audio clips: path of the underlying sample." },
+        { "name": "is_playing", "type": "bool", "access": "read-only", "description": "Whether the clip is currently playing." },
+        { "name": "playing_position", "type": "float", "access": "read-only", "description": "Current playback position in beats." },
+        { "name": "will_record_on_start", "type": "bool", "access": "read-only", "description": "Whether launching this clip starts recording." }
+      ],
+      "children": [
+        { "name": "view", "type": "Clip.View", "description": "The clip's view state." }
+      ],
+      "methods": [
+        { "name": "get_notes_extended(from_pitch, pitch_span, from_time, time_span)", "type": "NoteSpecification list", "description": "Live 11+: read notes including per-note probability, velocity deviation and release velocity, each with a stable note id." },
+        { "name": "add_new_notes(specification)", "description": "Live 11+: add notes with the extended per-note attributes." },
+        { "name": "apply_note_modifications(notes)", "description": "Live 11+: change existing notes in place, matched by note id." },
+        { "name": "remove_notes_extended(from_pitch, pitch_span, from_time, time_span)", "description": "Live 11+: delete the notes inside a pitch and time window." },
+        { "name": "get_notes(from_time, from_pitch, time_span, pitch_span)", "type": "tuple list", "description": "Older API: notes as (pitch, start, duration, velocity, mute) tuples, without the extended attributes." },
+        { "name": "set_notes(notes)", "description": "Older API: replace notes with a tuple list." },
+        { "name": "select_all_notes()", "description": "Select every note in the clip." },
+        { "name": "quantize(grid, amount)", "description": "Quantize the clip's contents to a grid, with amount from 0.0 to 1.0." },
+        { "name": "quantize_pitch(pitch, grid, amount)", "description": "Quantize only the notes of one pitch — useful for tightening a single drum lane." },
+        { "name": "crop()", "description": "Discard everything outside the loop brace." },
+        { "name": "duplicate_loop()", "description": "Double the loop length, copying the contents into the new half." },
+        { "name": "duplicate_region(start, length, destination_time)", "description": "Copy a region of the clip to another position within it." },
+        { "name": "fire()", "description": "Launch the clip." },
+        { "name": "stop()", "description": "Stop the clip." },
+        { "name": "automation_envelope(parameter)", "type": "DeviceParameter envelope", "description": "The clip's automation for a parameter, creating it on demand. Pass None to clear it." },
+        { "name": "clear_envelope(parameter)", "description": "Remove the clip's automation for a parameter." },
+        { "name": "clear_all_envelopes()", "description": "Remove every automation envelope in the clip." },
+        { "name": "get_warp_markers()", "type": "WarpMarker list", "description": "Audio clips: the warp markers." },
+        { "name": "set_fire_button_state(state)", "description": "Hold or release the launch button." }
+      ]
+    },
+    {
+      "name": "Clip.View",
+      "path": "live_set tracks N clip_slots M clip view",
+      "description": "View state for one clip.",
+      "methods": [
+        { "name": "show_loop()", "description": "Scroll the clip view to the loop brace." },
+        { "name": "hide_envelope()", "description": "Hide the automation lane." },
+        { "name": "select_envelope_parameter(parameter)", "description": "Show a parameter's automation lane." }
+      ],
+      "properties": [
+        { "name": "grid_quantization", "type": "int", "access": "read/write", "description": "The editing grid shown in the clip view." },
+        { "name": "grid_is_triplet", "type": "bool", "access": "read/write", "description": "Whether the grid is triplet-based." }
+      ]
+    },
+    {
+      "name": "Device",
+      "path": "live_set tracks N devices M",
+      "description": "An instrument, audio effect or MIDI effect. Racks are Devices with chains; see RackDevice.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "The device's display name, which the user may have renamed." },
+        { "name": "class_name", "type": "string", "access": "read-only", "description": "Live's internal class, e.g. \"Operator\", \"AutoFilter\", \"InstrumentGroupDevice\". Use this rather than `name` to identify what a device actually is." },
+        { "name": "class_display_name", "type": "string", "access": "read-only", "description": "The device type as Live presents it." },
+        { "name": "type", "type": "int", "access": "read-only", "description": "0 = undefined, 1 = instrument, 2 = audio effect, 4 = MIDI effect." },
+        { "name": "is_active", "type": "bool", "access": "read-only", "description": "Whether the device is on and not bypassed by a parent." },
+        { "name": "can_have_chains", "type": "bool", "access": "read-only", "description": "True for racks." },
+        { "name": "can_have_drum_pads", "type": "bool", "access": "read-only", "description": "True for Drum Racks." }
+      ],
+      "children": [
+        { "name": "parameters", "type": "DeviceParameter list", "description": "The device's automatable parameters. Index 0 is always the on/off switch." },
+        { "name": "view", "type": "Device.View", "description": "The device's view state." }
+      ],
+      "methods": [
+        { "name": "store_chosen_bank(index, bank)", "description": "Remember a parameter bank for control surfaces." }
+      ]
+    },
+    {
+      "name": "DeviceParameter",
+      "path": "live_set tracks N devices M parameters K",
+      "description": "One automatable control. This is the object every parameter-setting tool ultimately writes to.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read-only", "description": "Parameter name, e.g. \"Filter Freq\"." },
+        { "name": "original_name", "type": "string", "access": "read-only", "description": "The name before any macro renaming." },
+        { "name": "value", "type": "float", "access": "read/write", "description": "Current value, in the parameter's own units, between `min` and `max`. Not normalised — a frequency parameter's value may be in hertz." },
+        { "name": "min", "type": "float", "access": "read-only", "description": "Lowest accepted value." },
+        { "name": "max", "type": "float", "access": "read-only", "description": "Highest accepted value." },
+        { "name": "default_value", "type": "float", "access": "read-only", "description": "The value the parameter resets to." },
+        { "name": "is_quantized", "type": "bool", "access": "read-only", "description": "True when the parameter steps between named settings rather than varying continuously. For these, `value` is the index of the setting." },
+        { "name": "value_items", "type": "string list", "access": "read-only", "description": "For a quantized parameter, the named settings in order — this is how you learn that a filter type of 2 means Bandpass." },
+        { "name": "is_enabled", "type": "bool", "access": "read-only", "description": "Whether the parameter can currently be changed." },
+        { "name": "automation_state", "type": "int", "access": "read-only", "description": "0 = none, 1 = playing automation, 2 = overridden." },
+        { "name": "state", "type": "int", "access": "read-only", "description": "0 = enabled, 1 = irrelevant, 2 = locked by a macro mapping." }
+      ],
+      "methods": [
+        { "name": "str_for_value(value)", "type": "string", "description": "Format a value the way Live displays it, e.g. \"2.5 kHz\" or \"-6.0 dB\". The only reliable way to know what a raw number means to the user." },
+        { "name": "re_enable_automation()", "description": "Re-engage automation after the parameter was overridden." }
+      ]
+    },
+    {
+      "name": "RackDevice",
+      "path": "live_set tracks N devices M",
+      "description": "An Instrument, Drum, Audio Effect or MIDI Effect Rack — a Device that contains parallel chains.",
+      "children": [
+        { "name": "chains", "type": "Chain list", "description": "The rack's chains." },
+        { "name": "return_chains", "type": "Chain list", "description": "Return chains inside the rack." },
+        { "name": "drum_pads", "type": "DrumPad list", "description": "Drum Racks only: 128 pads, indexed by MIDI note." },
+        { "name": "visible_drum_pads", "type": "DrumPad list", "description": "Drum Racks only: the pads currently shown." }
+      ],
+      "properties": [
+        { "name": "macros_mapped", "type": "bool list", "access": "read-only", "description": "Which macro controls are mapped to something." },
+        { "name": "variation_count", "type": "int", "access": "read-only", "description": "Live 11+: number of stored macro variations." },
+        { "name": "selected_variation_index", "type": "int", "access": "read/write", "description": "Live 11+: the active macro variation." },
+        { "name": "has_macro_mappings", "type": "bool", "access": "read-only", "description": "Whether any macro is mapped." },
+        { "name": "is_showing_chains", "type": "bool", "access": "read/write", "description": "Whether the chain list is open." }
+      ],
+      "methods": [
+        { "name": "store_variation()", "description": "Live 11+: save the current macro positions as a variation." },
+        { "name": "recall_selected_variation()", "description": "Live 11+: restore the selected macro variation." },
+        { "name": "randomize_macros()", "description": "Live 11+: randomise the macro controls." },
+        { "name": "copy_pad(source, destination)", "description": "Drum Racks: copy one pad to another." }
+      ]
+    },
+    {
+      "name": "Chain",
+      "path": "live_set tracks N devices M chains K",
+      "description": "One parallel signal path inside a rack, with its own devices and mixer.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "Chain name." },
+        { "name": "color", "type": "int", "access": "read/write", "description": "Colour as 0xRRGGBB." },
+        { "name": "mute", "type": "bool", "access": "read/write", "description": "Muted state." },
+        { "name": "solo", "type": "bool", "access": "read/write", "description": "Soloed state." },
+        { "name": "is_auto_colored", "type": "bool", "access": "read/write", "description": "Whether the chain takes its colour from the rack." }
+      ],
+      "children": [
+        { "name": "devices", "type": "Device list", "description": "Devices in this chain — this is how racks nest." },
+        { "name": "mixer_device", "type": "ChainMixerDevice", "description": "The chain's own volume, pan and sends." }
+      ]
+    },
+    {
+      "name": "ChainMixerDevice",
+      "path": "live_set tracks N devices M chains K mixer_device",
+      "description": "A rack chain's mixer — the balance between layers of an Instrument Rack, or the level of one drum pad.",
+      "children": [
+        { "name": "volume", "type": "DeviceParameter", "description": "Chain fader, 0.0 to 1.0." },
+        { "name": "panning", "type": "DeviceParameter", "description": "-1.0 to 1.0." },
+        { "name": "chain_activator", "type": "DeviceParameter", "description": "The chain on/off switch." },
+        { "name": "sends", "type": "DeviceParameter list", "description": "Sends to the rack's return chains." }
+      ]
+    },
+    {
+      "name": "DrumPad",
+      "path": "live_set tracks N devices M drum_pads K",
+      "description": "One pad of a Drum Rack, fixed to a MIDI note.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "Pad name, usually the loaded sample's." },
+        { "name": "note", "type": "int", "access": "read-only", "description": "The MIDI note this pad responds to. 36 is C1, the usual kick." },
+        { "name": "mute", "type": "bool", "access": "read/write", "description": "Muted state." },
+        { "name": "solo", "type": "bool", "access": "read/write", "description": "Soloed state." }
+      ],
+      "children": [
+        { "name": "chains", "type": "Chain list", "description": "The chains loaded on this pad." }
+      ]
+    },
+    {
+      "name": "Scene",
+      "path": "live_set scenes N",
+      "description": "A row of the Session grid, launched as a unit.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "Scene name." },
+        { "name": "color", "type": "int", "access": "read/write", "description": "Colour as 0xRRGGBB." },
+        { "name": "tempo", "type": "float", "access": "read/write", "description": "Tempo the scene switches to when launched." },
+        { "name": "is_tempo_enabled", "type": "bool", "access": "read/write", "description": "Whether the scene applies its tempo." },
+        { "name": "time_signature_numerator", "type": "int", "access": "read/write", "description": "Scene time signature: beats per bar." },
+        { "name": "time_signature_denominator", "type": "int", "access": "read/write", "description": "Scene time signature: beat unit." },
+        { "name": "is_time_signature_enabled", "type": "bool", "access": "read/write", "description": "Whether the scene applies its time signature." },
+        { "name": "is_empty", "type": "bool", "access": "read-only", "description": "Whether the scene holds no clips." },
+        { "name": "is_triggered", "type": "bool", "access": "read-only", "description": "Whether the scene is waiting to launch." }
+      ],
+      "children": [
+        { "name": "clip_slots", "type": "ClipSlot list", "description": "The slots in this row, one per track." }
+      ],
+      "methods": [
+        { "name": "fire()", "description": "Launch every clip in the scene." },
+        { "name": "fire_as_selected()", "description": "Launch the scene and move the selection to it." }
+      ]
+    },
+    {
+      "name": "CuePoint",
+      "path": "live_set cue_points N",
+      "description": "An Arrangement locator. Live keeps `cue_points` sorted by time.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "Locator label." },
+        { "name": "time", "type": "float", "access": "read-only", "description": "Position in beats. A locator cannot be moved through the API — delete it and make a new one." }
+      ],
+      "methods": [
+        { "name": "jump()", "description": "Move the playhead to this locator." }
+      ]
+    },
+    {
+      "name": "Browser",
+      "path": "live_app browser",
+      "description": "Live's browser. Its top-level categories are the roots you can walk to find loadable items.",
+      "children": [
+        { "name": "instruments", "type": "BrowserItem", "description": "The Instruments category." },
+        { "name": "drums", "type": "BrowserItem", "description": "The Drums category." },
+        { "name": "sounds", "type": "BrowserItem", "description": "The Sounds category." },
+        { "name": "audio_effects", "type": "BrowserItem", "description": "The Audio Effects category." },
+        { "name": "midi_effects", "type": "BrowserItem", "description": "The MIDI Effects category." },
+        { "name": "plugins", "type": "BrowserItem", "description": "VST and Audio Unit plug-ins." },
+        { "name": "max_for_live", "type": "BrowserItem", "description": "Max for Live devices." },
+        { "name": "samples", "type": "BrowserItem", "description": "The Samples category." },
+        { "name": "packs", "type": "BrowserItem", "description": "Installed Packs." },
+        { "name": "user_library", "type": "BrowserItem", "description": "The User Library." },
+        { "name": "current_project", "type": "BrowserItem", "description": "The current project's folder." }
+      ],
+      "methods": [
+        { "name": "load_item(item)", "description": "Load a browser item onto the selected track. Select the track first — there is no argument for it." },
+        { "name": "preview_item(item)", "description": "Audition a browser item without loading it." },
+        { "name": "stop_preview()", "description": "Stop the audition." }
+      ]
+    },
+    {
+      "name": "BrowserItem",
+      "path": "live_app browser instruments children N",
+      "description": "A folder or a loadable thing in the browser.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read-only", "description": "Display name." },
+        { "name": "uri", "type": "string", "access": "read-only", "description": "Stable identifier used to load the item." },
+        { "name": "is_loadable", "type": "bool", "access": "read-only", "description": "Whether this can be loaded onto a track, as opposed to being a folder." },
+        { "name": "is_folder", "type": "bool", "access": "read-only", "description": "Whether it contains other items." },
+        { "name": "is_device", "type": "bool", "access": "read-only", "description": "Whether it is a device rather than a sample or preset." },
+        { "name": "is_selected", "type": "bool", "access": "read-only", "description": "Whether it is highlighted in the browser." },
+        { "name": "source", "type": "string", "access": "read-only", "description": "Where it comes from, e.g. the Pack name." }
+      ],
+      "children": [
+        { "name": "children", "type": "BrowserItem list", "description": "Contained items. Walking these is what makes a full browser scan slow." }
+      ]
+    },
+    {
+      "name": "NoteSpecification",
+      "path": "n/a",
+      "description": "The shape of a note in Live 11+'s extended note API. This is what get_notes_extended returns and add_new_notes accepts.",
+      "properties": [
+        { "name": "note_id", "type": "int", "access": "read-only", "description": "Stable identifier, used to modify a note in place rather than replacing the clip's contents." },
+        { "name": "pitch", "type": "int", "access": "read/write", "description": "MIDI note number, 0 to 127. 60 is middle C." },
+        { "name": "start_time", "type": "float", "access": "read/write", "description": "Offset in beats from the clip's origin." },
+        { "name": "duration", "type": "float", "access": "read/write", "description": "Length in beats." },
+        { "name": "velocity", "type": "float", "access": "read/write", "description": "Attack velocity, 0 to 127." },
+        { "name": "mute", "type": "bool", "access": "read/write", "description": "Whether the note is deactivated." },
+        { "name": "probability", "type": "float", "access": "read/write", "description": "Live 11+: chance the note plays, 0.0 to 1.0." },
+        { "name": "velocity_deviation", "type": "float", "access": "read/write", "description": "Live 11+: range of random velocity variation." },
+        { "name": "release_velocity", "type": "float", "access": "read/write", "description": "Live 11+: release velocity, 0 to 127." }
+      ]
+    }
+  ]
+}
