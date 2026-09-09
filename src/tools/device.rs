@@ -8,7 +8,7 @@ pub fn tools() -> Vec<ToolDef> {
             "get_devices",
             "List a track's device chain: each device's index, name, class, type \
              (instrument, audio effect, midi effect), whether it is on, and whether it is a \
-             rack — with its chains listed so you can address devices nested inside it.",
+             rack, with its chains listed so you can address devices nested inside it.",
         )
         .read_only()
         .track_ref(),
@@ -19,7 +19,7 @@ pub fn tools() -> Vec<ToolDef> {
             "Read every parameter of a device, with the information needed to actually set it: \
              name, current value, min and max, the value formatted the way Live displays it \
              (so you see \"2.5 kHz\" rather than 0.63), whether the parameter is quantized, \
-             and for quantized parameters the list of named settings in order — which is how \
+             and for quantized parameters the list of named settings in order, which is how \
              you learn that a filter type of 2 means Bandpass. Read this before \
              `set_device_parameter`.",
         )
@@ -29,7 +29,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "set_device_parameter",
             "set_device_parameter",
-            "Set one device parameter. Identify it by index or by name — name is safer, since \
+            "Set one device parameter. Identify it by index or by name. Name is safer, since \
              indices shift between device versions. Values are in the parameter's own units \
              and are clamped to its range; for a quantized parameter, pass the position of the \
              setting you want.",
@@ -42,7 +42,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "set_device_parameters",
             "set_device_parameters",
-            "Set several parameters of one device at once — dialling in a whole patch in a \
+            "Set several parameters of one device at once, dialling in a whole patch in a \
              single pass rather than one round trip per knob.",
         )
         .device_ref()
@@ -77,7 +77,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "set_chain_mixer",
             "set_chain_mixer",
-            "Change a rack chain's own mixer — the balance between layers of an Instrument \
+            "Change a rack chain's own mixer: the balance between layers of an Instrument \
              Rack, or the level of one drum pad. Omit anything you do not want to touch.",
         )
         .device_ref()

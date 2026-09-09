@@ -15,7 +15,7 @@ pub fn tools() -> Vec<ToolDef> {
             "get_session_info",
             "Overview of the open Live set: tempo, time signature, transport and record state, \
              loop region, track and scene counts, and the names of the tracks and scenes. \
-             Start here — it is the cheapest way to orient yourself before making changes.",
+             Start here: it is the cheapest way to orient yourself before making changes.",
         )
         .read_only(),
 
@@ -24,7 +24,7 @@ pub fn tools() -> Vec<ToolDef> {
             "get_session_snapshot",
             "Full state of the set: every track with its mixer, devices, session clips and \
              arrangement clips, plus return and master tracks, scenes and locators. This is a \
-             large payload — prefer `get_session_info` and the targeted `get_*` tools unless \
+             large payload. Prefer `get_session_info` and the targeted `get_*` tools unless \
              you genuinely need everything at once.",
         )
         .read_only()
@@ -112,7 +112,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "undo",
             "undo",
-            "Undo the last change in Live — including changes the user made by hand. Live's \
+            "Undo the last change in Live, including changes the user made by hand. Live's \
              undo history is shared, so this is not limited to your own edits.",
         )
         .destructive(),
@@ -147,7 +147,7 @@ pub fn tools() -> Vec<ToolDef> {
             "set_selection",
             "set_selection",
             "Move Live's selection, so the user's screen follows what you are describing. \
-             Purely a view change — it edits nothing.",
+             Purely a view change, it edits nothing.",
         )
         .opt_int("track_index", "Track to select.")
         .opt_int("scene_index", "Scene to select.")

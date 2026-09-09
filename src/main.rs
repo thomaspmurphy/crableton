@@ -120,7 +120,7 @@ async fn doctor(tools: Arc<ToolRegistry>) -> Result<()> {
                 if script.exists() {
                     format!("installed at {}", script.display())
                 } else {
-                    "not installed — run `crableton install`".to_string()
+                    "not installed, run `crableton install`".to_string()
                 }
             );
         }

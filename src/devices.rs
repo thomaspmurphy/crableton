@@ -3,7 +3,7 @@
 //! `get_device_parameters` reports that Roar has forty parameters with names.
 //! It cannot say that three of them matter, that `Filter Morph` is inert
 //! outside Morph mode, or that driving a pad crowds everything above it. That
-//! is what this carries — keyed by `class_name` so the two join up.
+//! is what this carries, keyed by `class_name` so the two join up.
 
 use std::sync::OnceLock;
 
@@ -77,7 +77,7 @@ fn index(reference: &Reference) -> Value {
     })
 }
 
-/// Match on `class_name` first — that is what Live reports — then on the
+/// Match on `class_name` first, since that is what Live reports, then on the
 /// display name, so both "InstrumentVector" and "Wavetable" resolve.
 fn describe(reference: &Reference, wanted: &str) -> Value {
     let needle = normalise(wanted);

@@ -16,7 +16,7 @@ pub fn tools() -> Vec<ToolDef> {
             "get_clip_notes",
             "Read the MIDI notes of a clip: pitch, start time, duration, velocity and mute, \
              plus per-note probability, velocity deviation and release velocity where Live \
-             supports them. Optionally restrict to a window of time and pitch — useful for \
+             supports them. Optionally restrict to a window of time and pitch, useful for \
              reading one bar or one drum lane out of a busy clip.",
         )
         .read_only()

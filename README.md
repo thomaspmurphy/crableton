@@ -62,8 +62,9 @@ placed copies carry it.
 compute from one session snapshot, server-side, so the large payload does not
 reach the model. They report measurements, not opinions:
 
-- Estimated key with a confidence and an ambiguity flag, chord per bar, notes
-  outside the scale.
+- The tonic, the mode and the scale collection: Dorian is named Dorian rather
+  than fitted to the nearest minor key. Plus chord per bar, genuinely chromatic
+  notes, and a flag for whether the notes played actually pin the mode down.
 - Sections inferred from which tracks are actually playing, with the bar where
   each transition happens and what enters or exits.
 - Pitch range and duration-weighted centre per track, pairs of tracks competing
@@ -142,6 +143,12 @@ Known gaps:
 - `analyze_mix` register ranges are MIDI note fundamentals, not measured
   spectra. Saturation and unison move where a part actually sits, so treat
   reported collisions as places to listen rather than faults.
+- `analyze_harmony` finds the tonic by profile correlation and the mode from
+  the played pitch classes. The mode is therefore only as good as the tonic:
+  material that never emphasises its tonic will be named as a rotation of the
+  right collection around the wrong note. Diatonic, pentatonic, blues,
+  harmonic minor, melodic minor and whole tone collections are recognised;
+  anything else falls back to reporting the chromatic notes.
 
 ## Licence
 

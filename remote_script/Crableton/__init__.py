@@ -1,4 +1,4 @@
-# Crableton — the Live-side half of the crableton MCP server.
+# Crableton, the Live-side half of the crableton MCP server.
 #
 # Ableton Live only loads Python control surfaces, so this script runs inside
 # Live, exposes its object model over a TCP socket, and is driven by the
@@ -150,7 +150,7 @@ class AbletonMCP(ControlSurface):
             self.log_message("Listening on %s:%d" % (HOST, DEFAULT_PORT))
         except Exception as e:
             self.log_message("Could not start server: %s" % e)
-            self.show_message("Crableton: port %d unavailable — %s" % (DEFAULT_PORT, e))
+            self.show_message("Crableton: port %d unavailable, %s" % (DEFAULT_PORT, e))
 
     def _server_thread(self):
         try:
@@ -1082,7 +1082,7 @@ class AbletonMCP(ControlSurface):
 
     @staticmethod
     def _display_value(parameter):
-        """How Live shows a parameter — "-6.0 dB" rather than 0.63."""
+        """How Live shows a parameter, "-6.0 dB" rather than 0.63."""
         try:
             return parameter.str_for_value(parameter.value)
         except Exception:
@@ -1186,7 +1186,7 @@ class AbletonMCP(ControlSurface):
 
     @staticmethod
     def _clamp_parameter(parameter, value):
-        """Keep writes inside the parameter's range — Live raises otherwise."""
+        """Keep writes inside the parameter's range, Live raises otherwise."""
         return max(parameter.min, min(parameter.max, float(value)))
 
     def _set_track_send(self, params, respond):
@@ -1331,7 +1331,7 @@ class AbletonMCP(ControlSurface):
         slot = self._resolve_slot(track, index)
         if slot.has_clip:
             raise ValueError(
-                "clip slot %d already holds %r — delete it first if you mean to replace it"
+                "clip slot %d already holds %r, delete it first if you mean to replace it"
                 % (index, slot.clip.name)
             )
         if not self._get(track, "has_midi_input", False):
@@ -1480,7 +1480,7 @@ class AbletonMCP(ControlSurface):
         """The clip, the parameter, and Live's envelope object for the pair.
 
         ``automation_envelope`` returns None when the clip has no envelope for
-        the parameter yet — it does not create one. Creating is a separate call
+        the parameter yet, it does not create one. Creating is a separate call
         whose name has varied across Live versions, so try what is present
         rather than assuming.
         """
@@ -1493,7 +1493,7 @@ class AbletonMCP(ControlSurface):
         if envelope is None:
             # An Arrangement clip duplicated from an automated Session clip
             # keeps its envelopes, but `automation_envelope(parameter)` will not
-            # resolve them — the parameter object belongs to the track, not the
+            # resolve them, the parameter object belongs to the track, not the
             # placed copy. They are still reachable by walking the clip's own
             # envelope collection.
             envelope = self._envelope_from_collection(clip, parameter)
@@ -1519,7 +1519,7 @@ class AbletonMCP(ControlSurface):
             raise RuntimeError(
                 "Live will not create a new automation envelope on an Arrangement clip, "
                 "and %r has none for %r yet. Write the envelope on the Session clip "
-                "first and then use duplicate_clip_to_arrangement — the placed copies "
+                "first and then use duplicate_clip_to_arrangement, the placed copies "
                 "keep it, and can be rewritten in place afterwards."
                 % (clip.name, parameter.name)
             )
@@ -1628,7 +1628,7 @@ class AbletonMCP(ControlSurface):
 
         # Clear the old shape *without* dropping the envelope itself.
         # `clip.clear_envelope` destroys it, and Live will not recreate one on
-        # an Arrangement clip — so that route is a one-way door there.
+        # an Arrangement clip, so that route is a one-way door there.
         cleared = False
         if hasattr(envelope, "delete_events_in_range"):
             try:
@@ -1649,7 +1649,7 @@ class AbletonMCP(ControlSurface):
             _, _, envelope = self._envelope_for(params, create=True)
 
         # Breakpoints are what Live's own automation lane holds, and it ramps
-        # between them natively — so a smooth curve is a handful of events, not
+        # between them natively, so a smooth curve is a handful of events, not
         # hundreds of stepped approximations. Steps are only for a deliberate
         # staircase, or where `create_event` is unavailable.
         use_events = interpolation != "step" and hasattr(envelope, "create_event")
@@ -2441,7 +2441,7 @@ class AbletonMCP(ControlSurface):
 
         Live can only toggle a cue at the playhead, and writing
         current_song_time does not necessarily take effect within the same
-        tick — so the toggle waits for the playhead to actually arrive rather
+        tick, so the toggle waits for the playhead to actually arrive rather
         than assuming it has. Toggling early creates a stray locator at the old
         position and then fails to find the intended one.
         """

@@ -1,5 +1,5 @@
 {
-  "note": "Which parameters actually matter on Live's stock devices, and what they do musically. Keyed by the `class_name` that get_device_parameters reports, so the two join up. Parameter indices are deliberately absent — they shift between device versions, so match by name. This covers the devices most used in practice, not every device Live ships.",
+  "note": "Which parameters actually matter on Live's stock devices, and what they do musically. Keyed by the `class_name` that get_device_parameters reports, so the two join up. Parameter indices are deliberately absent, they shift between device versions, so match by name. This covers the devices most used in practice, not every device Live ships.",
   "reading_values": "Almost every Live parameter is 0.0-1.0 regardless of what it displays; `display_value` from get_device_parameters is the only reliable way to know what a number means. Quantized parameters (filter types, sync rates, modes) report `value_items` and their value is an index into that list.",
   "devices": [
     {
@@ -24,12 +24,12 @@
       "kind": "audio effect",
       "summary": "Saturation and distortion, from gentle warmth to destruction. Live 12's most capable colour device.",
       "key_parameters": [
-        { "name": "Amount", "does": "Drive. The main control — everything else shapes what this does. Low values thicken, high values distort." },
+        { "name": "Amount", "does": "Drive. The main control. Everything else shapes what this does. Low values thicken, high values distort." },
         { "name": "Output Gain", "does": "Compensates for the level Amount adds. Raise Amount and this usually needs lowering." },
         { "name": "Tone", "does": "Tilts the saturation brighter or darker. Darker suits bass, brighter suits pads that need presence." },
         { "name": "Feedback", "does": "Feeds output back in. Adds resonant grit; unstable at high settings." },
         { "name": "Dry/Wet", "does": "Blend. On a pad, keeping some dry preserves the original body." },
-        { "name": "Filter Frequency", "does": "Shapes what gets saturated — filter before driving to keep low end clean." }
+        { "name": "Filter Frequency", "does": "Shapes what gets saturated: filter before driving to keep low end clean." }
       ],
       "gotchas": "Saturation adds harmonics upward, so a driven pad occupies more high-frequency space than its notes suggest. Expect it to crowd anything above it."
     },
@@ -39,14 +39,14 @@
       "kind": "audio effect",
       "summary": "Delay with character. Best on a return track so several parts can share it.",
       "key_parameters": [
-        { "name": "L Time", "does": "Left delay time. Synced to tempo by default — 1/8 and 1/4 are the safe musical choices; dotted 1/8 gives the familiar trailing feel.", "quantized": true },
+        { "name": "L Time", "does": "Left delay time. Synced to tempo by default. 1/8 and 1/4 are the safe musical choices; dotted 1/8 gives the familiar trailing feel.", "quantized": true },
         { "name": "R Time", "does": "Right delay time. Setting it different from L widens the image." },
         { "name": "Feedback", "does": "How many repeats. Past ~0.7 the tail barely dies; at 1.0 it self-oscillates." },
         { "name": "Dry/Wet", "does": "On a return track set this to 1.0 and control the amount with the track's send instead." },
         { "name": "Input Gain", "does": "Drives the delay line without changing the send level." },
         { "name": "Reverb Level", "does": "Built-in reverb on the repeats. Blurs the tail into something more ambient." }
       ],
-      "gotchas": "Feedback plus Reverb Level accumulates energy — a patch that sounds fine on one note can wash out under a chord."
+      "gotchas": "Feedback plus Reverb Level accumulates energy, a patch that sounds fine on one note can wash out under a chord."
     },
     {
       "class_name": "Reverb",
@@ -58,7 +58,7 @@
         { "name": "Dry/Wet", "does": "1.0 on a return track; control the amount with each track's send." },
         { "name": "Predelay", "does": "Gap before the reverb starts. A little keeps the source distinct rather than smeared." },
         { "name": "Room Size", "does": "Character of the space, independent of decay length." },
-        { "name": "Lo Cut", "does": "Removes bass from the reverb. Almost always worth engaging — reverberated low end is what makes a mix muddy." },
+        { "name": "Lo Cut", "does": "Removes bass from the reverb. Almost always worth engaging, reverberated low end is what makes a mix muddy." },
         { "name": "Hi Cut", "does": "Removes treble from the tail, pushing the space further back." }
       ],
       "gotchas": "Reverb on a low-register part is the most common cause of a congested mix. Filter the bass out of the send, or do not send bass at all."
@@ -86,7 +86,7 @@
       "key_parameters": [
         { "name": "1 Frequency A", "does": "Band 1 centre. Bands are numbered 1-8, each with Frequency, Gain, Q and a filter type." },
         { "name": "1 Gain A", "does": "Cut or boost. Cutting is usually more transparent than boosting." },
-        { "name": "1 Resonance A", "does": "Q — bandwidth. Narrow for removing a specific problem, wide for tonal shaping." },
+        { "name": "1 Resonance A", "does": "Q, bandwidth. Narrow for removing a specific problem, wide for tonal shaping." },
         { "name": "1 Filter Type A", "does": "High-pass, low-shelf, bell, notch, high-shelf, low-pass.", "quantized": true }
       ],
       "gotchas": "Parameter names carry a band number and an A/B channel suffix, so always read them from get_device_parameters rather than guessing. A high-pass on everything that is not bass is the single most effective mix move."
@@ -98,7 +98,7 @@
       "summary": "FM synthesis. Excellent for bells, metallic timbres, electric-piano tones and hard basses.",
       "key_parameters": [
         { "name": "Osc-A Coarse", "does": "Carrier pitch ratio. Integer ratios sound harmonic; non-integer sound metallic or bell-like." },
-        { "name": "Osc-B Coarse", "does": "Modulator ratio — the main determinant of timbre in FM." },
+        { "name": "Osc-B Coarse", "does": "Modulator ratio, the main determinant of timbre in FM." },
         { "name": "Osc-B Level", "does": "Modulation depth. This is the FM 'brightness' control; small changes alter the timbre drastically." },
         { "name": "Filter Freq", "does": "Post-FM filter cutoff." },
         { "name": "Volume Attack / Decay / Sustain / Release", "does": "Amplitude envelope. Long attack plus long release gives a pad; short both gives a pluck." }
@@ -118,7 +118,7 @@
         { "name": "Amp Attack / Decay / Sustain / Release", "does": "Amplitude envelope." },
         { "name": "Unison Amount", "does": "Detune spread. Widens a sound, at the cost of pitch definition and mono compatibility." }
       ],
-      "gotchas": "Unison widening makes a part occupy far more stereo and frequency space than its note range implies — the usual reason several pads stop fitting together."
+      "gotchas": "Unison widening makes a part occupy far more stereo and frequency space than its note range implies, the usual reason several pads stop fitting together."
     },
     {
       "class_name": "InstrumentGroupDevice",
@@ -137,7 +137,7 @@
       "summary": "Turns held notes into patterns. Placed before an instrument in the chain.",
       "key_parameters": [
         { "name": "Rate", "does": "Note speed, synced to tempo. 1/16 is the common choice.", "quantized": true },
-        { "name": "Style", "does": "Pattern direction — up, down, up-down, converge, diverge, random and others.", "quantized": true },
+        { "name": "Style", "does": "Pattern direction, up, down, up-down, converge, diverge, random and others.", "quantized": true },
         { "name": "Steps", "does": "How many octaves or transposition steps the pattern climbs." },
         { "name": "Gate", "does": "Note length as a proportion of the rate. Below 100% gives separation; above overlaps." },
         { "name": "Groove", "does": "Swing feel." }
@@ -153,7 +153,7 @@
         { "name": "Drive", "does": "Amount of saturation." },
         { "name": "Output", "does": "Level compensation." },
         { "name": "Dry/Wet", "does": "Blend." },
-        { "name": "Type", "does": "Saturation curve — analog clip, soft sine, digital clip and others.", "quantized": true }
+        { "name": "Type", "does": "Saturation curve, analog clip, soft sine, digital clip and others.", "quantized": true }
       ]
     },
     {
@@ -163,7 +163,7 @@
       "summary": "Ceiling control. Belongs on the master, last in the chain.",
       "key_parameters": [
         { "name": "Ceiling", "does": "Maximum output level. -0.3 dB is a safe target." },
-        { "name": "Gain", "does": "Input drive. Raising this is what makes things louder — and squashes dynamics." },
+        { "name": "Gain", "does": "Input drive. Raising this is what makes things louder, and squashes dynamics." },
         { "name": "Release", "does": "Recovery speed. Auto is usually right." }
       ],
       "gotchas": "A limiter fixes peaks, not a mix. If it is working hard, the problem is upstream."

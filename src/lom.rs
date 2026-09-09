@@ -3,7 +3,7 @@
 //! The Remote Script can only reach what the Live API actually exposes, and the
 //! shape of that API is not discoverable from the tools themselves. Compiling a
 //! condensed reference in means a model can check whether something is even
-//! possible — and interpret the fields it gets back — without network access
+//! possible, and interpret the fields it gets back, without network access
 //! and without a Live version to interrogate.
 
 use std::sync::OnceLock;

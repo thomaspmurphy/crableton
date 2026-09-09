@@ -1,6 +1,6 @@
 {
   "version": "Live 12",
-  "note": "Condensed reference to Ableton's Live Object Model — the API a MIDI Remote Script can reach. Covers the members crableton uses or that are useful for reasoning about what Live can do; it is not the complete model, and availability varies by Live version and edition. Members marked read-only cannot be changed by any tool, however the request is phrased.",
+  "note": "Condensed reference to Ableton's Live Object Model, the API a MIDI Remote Script can reach. Covers the members crableton uses or that are useful for reasoning about what Live can do; it is not the complete model, and availability varies by Live version and edition. Members marked read-only cannot be changed by any tool, however the request is phrased.",
   "classes": [
     {
       "name": "Application",
@@ -40,7 +40,7 @@
       "properties": [
         { "name": "tempo", "type": "float", "access": "read/write", "description": "Beats per minute, 20.0 to 999.0." },
         { "name": "is_playing", "type": "bool", "access": "read/write", "description": "Whether the transport is running." },
-        { "name": "current_song_time", "type": "float", "access": "read/write", "description": "Playhead position in beats. Writing it is not guaranteed to take effect within the same tick — anything that depends on the new position must run on a later tick." },
+        { "name": "current_song_time", "type": "float", "access": "read/write", "description": "Playhead position in beats. Writing it is not guaranteed to take effect within the same tick, anything that depends on the new position must run on a later tick." },
         { "name": "signature_numerator", "type": "int", "access": "read/write", "description": "Beats per bar." },
         { "name": "signature_denominator", "type": "int", "access": "read/write", "description": "Beat unit: 1, 2, 4, 8, 16, 32 or 64." },
         { "name": "metronome", "type": "bool", "access": "read/write", "description": "Click on or off." },
@@ -90,7 +90,7 @@
         { "name": "duplicate_scene(index)", "description": "Duplicate a scene." },
         { "name": "capture_and_insert_scene()", "description": "Capture what is playing into a new scene." },
         { "name": "capture_midi()", "description": "Capture recently played MIDI into a clip." },
-        { "name": "set_or_delete_cue()", "description": "Toggle a locator at the current playhead position. There is no API to create one at an arbitrary time — you must move the playhead first, on an earlier tick." },
+        { "name": "set_or_delete_cue()", "description": "Toggle a locator at the current playhead position. There is no API to create one at an arbitrary time, you must move the playhead first, on an earlier tick." },
         { "name": "jump_to_next_cue()", "description": "Move the playhead to the next locator." },
         { "name": "jump_to_prev_cue()", "description": "Move the playhead to the previous locator." },
         { "name": "jump_by(beats)", "description": "Move the playhead relative to its current position." },
@@ -230,7 +230,7 @@
         { "name": "loop_end", "type": "float", "access": "read/write", "description": "Loop end in beats. Must exceed loop_start." },
         { "name": "start_marker", "type": "float", "access": "read/write", "description": "Playback start marker." },
         { "name": "end_marker", "type": "float", "access": "read/write", "description": "Playback end marker." },
-        { "name": "start_time", "type": "float", "access": "read-only", "description": "Arrangement clips: position on the timeline. There is no API to move a clip — delete it and re-place it instead." },
+        { "name": "start_time", "type": "float", "access": "read-only", "description": "Arrangement clips: position on the timeline. There is no API to move a clip, delete it and re-place it instead." },
         { "name": "end_time", "type": "float", "access": "read-only", "description": "Arrangement clips: where the clip ends on the timeline." },
         { "name": "muted", "type": "bool", "access": "read/write", "description": "Whether the clip is deactivated." },
         { "name": "signature_numerator", "type": "int", "access": "read/write", "description": "Clip time signature: beats per bar." },
@@ -268,7 +268,7 @@
         { "name": "set_notes(notes)", "description": "Older API: replace notes with a tuple list." },
         { "name": "select_all_notes()", "description": "Select every note in the clip." },
         { "name": "quantize(grid, amount)", "description": "Quantize the clip's contents to a grid, with amount from 0.0 to 1.0." },
-        { "name": "quantize_pitch(pitch, grid, amount)", "description": "Quantize only the notes of one pitch — useful for tightening a single drum lane." },
+        { "name": "quantize_pitch(pitch, grid, amount)", "description": "Quantize only the notes of one pitch, useful for tightening a single drum lane." },
         { "name": "crop()", "description": "Discard everything outside the loop brace." },
         { "name": "duplicate_loop()", "description": "Double the loop length, copying the contents into the new half." },
         { "name": "duplicate_region(start, length, destination_time)", "description": "Copy a region of the clip to another position within it." },
@@ -323,12 +323,12 @@
       "properties": [
         { "name": "name", "type": "string", "access": "read-only", "description": "Parameter name, e.g. \"Filter Freq\"." },
         { "name": "original_name", "type": "string", "access": "read-only", "description": "The name before any macro renaming." },
-        { "name": "value", "type": "float", "access": "read/write", "description": "Current value, in the parameter's own units, between `min` and `max`. Not normalised — a frequency parameter's value may be in hertz." },
+        { "name": "value", "type": "float", "access": "read/write", "description": "Current value, in the parameter's own units, between `min` and `max`. Not normalised, a frequency parameter's value may be in hertz." },
         { "name": "min", "type": "float", "access": "read-only", "description": "Lowest accepted value." },
         { "name": "max", "type": "float", "access": "read-only", "description": "Highest accepted value." },
         { "name": "default_value", "type": "float", "access": "read-only", "description": "The value the parameter resets to." },
         { "name": "is_quantized", "type": "bool", "access": "read-only", "description": "True when the parameter steps between named settings rather than varying continuously. For these, `value` is the index of the setting." },
-        { "name": "value_items", "type": "string list", "access": "read-only", "description": "For a quantized parameter, the named settings in order — this is how you learn that a filter type of 2 means Bandpass." },
+        { "name": "value_items", "type": "string list", "access": "read-only", "description": "For a quantized parameter, the named settings in order, this is how you learn that a filter type of 2 means Bandpass." },
         { "name": "is_enabled", "type": "bool", "access": "read-only", "description": "Whether the parameter can currently be changed." },
         { "name": "automation_state", "type": "int", "access": "read-only", "description": "0 = none, 1 = playing automation, 2 = overridden." },
         { "name": "state", "type": "int", "access": "read-only", "description": "0 = enabled, 1 = irrelevant, 2 = locked by a macro mapping." }
@@ -341,7 +341,7 @@
     {
       "name": "RackDevice",
       "path": "live_set tracks N devices M",
-      "description": "An Instrument, Drum, Audio Effect or MIDI Effect Rack — a Device that contains parallel chains.",
+      "description": "An Instrument, Drum, Audio Effect or MIDI Effect Rack, a Device that contains parallel chains.",
       "children": [
         { "name": "chains", "type": "Chain list", "description": "The rack's chains." },
         { "name": "return_chains", "type": "Chain list", "description": "Return chains inside the rack." },
@@ -374,14 +374,14 @@
         { "name": "is_auto_colored", "type": "bool", "access": "read/write", "description": "Whether the chain takes its colour from the rack." }
       ],
       "children": [
-        { "name": "devices", "type": "Device list", "description": "Devices in this chain — this is how racks nest." },
+        { "name": "devices", "type": "Device list", "description": "Devices in this chain, this is how racks nest." },
         { "name": "mixer_device", "type": "ChainMixerDevice", "description": "The chain's own volume, pan and sends." }
       ]
     },
     {
       "name": "ChainMixerDevice",
       "path": "live_set tracks N devices M chains K mixer_device",
-      "description": "A rack chain's mixer — the balance between layers of an Instrument Rack, or the level of one drum pad.",
+      "description": "A rack chain's mixer: the balance between layers of an Instrument Rack, or the level of one drum pad.",
       "children": [
         { "name": "volume", "type": "DeviceParameter", "description": "Chain fader, 0.0 to 1.0." },
         { "name": "panning", "type": "DeviceParameter", "description": "-1.0 to 1.0." },
@@ -432,7 +432,7 @@
       "description": "An Arrangement locator. Live keeps `cue_points` sorted by time.",
       "properties": [
         { "name": "name", "type": "string", "access": "read/write", "description": "Locator label." },
-        { "name": "time", "type": "float", "access": "read-only", "description": "Position in beats. A locator cannot be moved through the API — delete it and make a new one." }
+        { "name": "time", "type": "float", "access": "read-only", "description": "Position in beats. A locator cannot be moved through the API, delete it and make a new one." }
       ],
       "methods": [
         { "name": "jump()", "description": "Move the playhead to this locator." }
@@ -456,7 +456,7 @@
         { "name": "current_project", "type": "BrowserItem", "description": "The current project's folder." }
       ],
       "methods": [
-        { "name": "load_item(item)", "description": "Load a browser item onto the selected track. Select the track first — there is no argument for it." },
+        { "name": "load_item(item)", "description": "Load a browser item onto the selected track. Select the track first, there is no argument for it." },
         { "name": "preview_item(item)", "description": "Audition a browser item without loading it." },
         { "name": "stop_preview()", "description": "Stop the audition." }
       ]

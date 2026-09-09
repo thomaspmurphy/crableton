@@ -19,7 +19,7 @@ pub fn tools() -> Vec<ToolDef> {
             "duplicate_clip_to_arrangement",
             "duplicate_clip_to_arrangement",
             "Copy a Session clip into the Arrangement timeline on the same track. Use `repeats` \
-             to lay down a run of consecutive copies — a 4-bar loop across 32 bars is one call, \
+             to lay down a run of consecutive copies: a 4-bar loop across 32 bars is one call, \
              not eight.",
         )
         .track_ref()
@@ -43,7 +43,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "clear_arrangement",
             "clear_arrangement",
-            "Delete Arrangement clips in bulk — a whole track, a beat range, or the entire \
+            "Delete Arrangement clips in bulk: a whole track, a beat range, or the entire \
              Arrangement across every track. This is how you undo a previous arrangement pass \
              before laying down a new one.",
         )

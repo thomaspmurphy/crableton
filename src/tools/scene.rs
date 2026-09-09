@@ -30,8 +30,8 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "capture_and_insert_scene",
             "capture_and_insert_scene",
-            "Capture whatever is currently playing into a new scene below the selected one — \
-             Live's Capture and Insert Scene. The fastest way to commit a good-sounding \
+            "Capture whatever is currently playing into a new scene below the selected one, as \
+             Live's Capture and Insert Scene does. The fastest way to commit a good-sounding \
              combination of clips.",
         ),
 

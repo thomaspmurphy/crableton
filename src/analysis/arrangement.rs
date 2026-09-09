@@ -57,8 +57,8 @@ pub fn analyze(snapshot: &Snapshot, min_section_bars: usize) -> Value {
     if clips.is_empty() {
         return json!({
             "arrangement_is_empty": true,
-            "note": "No clips in the Arrangement timeline. Session clips are not analysed here \
-                     — place them with duplicate_clip_to_arrangement first.",
+            "note": "No clips in the Arrangement timeline. Session clips are not analysed \
+                     here; place them with duplicate_clip_to_arrangement first.",
             "tempo": snapshot.tempo,
             "beats_per_bar": beats_per_bar,
         });
@@ -102,7 +102,7 @@ pub fn analyze(snapshot: &Snapshot, min_section_bars: usize) -> Value {
         })
         .collect();
 
-    // Where the instrumentation changes most sharply — the moments a listener
+    // Where the instrumentation changes most sharply: the moments a listener
     // hears as a transition.
     let mut turns: Vec<Value> = Vec::new();
     for pair in merged.windows(2) {

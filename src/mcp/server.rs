@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::live::LiveClient;
 use crate::mcp::registry::{ToolDef, ToolRegistry};
 
-/// How the model is told to drive Live. Kept short — long preambles crowd out
+/// How the model is told to drive Live. Kept short, long preambles crowd out
 /// the tool descriptions, which are where the real guidance lives.
 const INSTRUCTIONS: &str = "\
 Control Ableton Live over its Remote Script.
@@ -114,7 +114,7 @@ impl AbletonServer {
 
     /// Gather one snapshot and compute the requested analysis from it.
     ///
-    /// The snapshot is large — every clip, note and mixer value — but it stays
+    /// The snapshot is large, every clip, note and mixer value, but it stays
     /// here: only the analysis is returned, which is the whole point of doing
     /// this server-side rather than asking the model to reason over raw state.
     async fn run_analysis(&self, command: &str, params: &Value) -> CallToolResult {
@@ -171,7 +171,7 @@ impl AbletonServer {
             }
         };
 
-        // Served from the bundled reference — it never touches the socket, so it
+        // Served from the bundled reference, it never touches the socket, so it
         // works with Live closed.
         if tool.command == LOCAL_LOM {
             let answer = crate::lom::lookup(
@@ -265,7 +265,7 @@ impl ServerHandler for AbletonServer {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 Implementation::new("crableton", env!("CARGO_PKG_VERSION"))
-                    .with_title("Crableton — Ableton Live"),
+                    .with_title("Crableton, Ableton Live"),
             )
             .with_instructions(INSTRUCTIONS)
     }

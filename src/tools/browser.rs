@@ -22,8 +22,8 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "search_browser",
             "search_browser",
-            "Find loadable things in Live's browser by name — instruments, presets, samples, \
-             effects and racks — and get back the URIs `load_device` needs. This is almost \
+            "Find loadable things in Live's browser by name, instruments, presets, samples, \
+             effects and racks, and get back the URIs `load_device` needs. This is almost \
              always the right way in: walking the tree by hand is slow and the library layout \
              varies between installations.",
         )
@@ -39,7 +39,7 @@ pub fn tools() -> Vec<ToolDef> {
             "get_browser_tree",
             "get_browser_tree",
             "Walk Live's browser as a tree of folders. Slow on a large library, and cached \
-             between calls — prefer `search_browser` unless you specifically need the layout.",
+             between calls, prefer `search_browser` unless you specifically need the layout.",
         )
         .read_only()
         .opt_text("category_type", "Which part of the browser to show.")

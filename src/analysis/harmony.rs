@@ -1,6 +1,6 @@
 //! Harmonic analysis of MIDI notes.
 //!
-//! Reports what the notes *are* — pitch classes, chords, the best-fitting key —
+//! Reports what the notes *are*: pitch classes, chords and the best-fitting key,
 //! and leaves what to do about it to the caller. A model driving Live cannot
 //! hear the set, but it can reason about this perfectly well once someone has
 //! done the counting.
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{Note, PITCH_NAMES};
 
-/// Krumhansl–Kessler key profiles: how strongly each scale degree is weighted
+/// Krumhansl-Kessler key profiles: how strongly each scale degree is weighted
 /// in major and minor tonal music. Correlating a set's pitch-class histogram
 /// against all 24 rotations is the standard way to estimate a key, and it
 /// degrades gracefully on ambiguous material rather than guessing wildly.
@@ -76,6 +76,10 @@ impl KeyEstimate {
     }
 
     /// Scale degrees of this key, as pitch classes.
+    ///
+    /// Only the major and minor readings. For modal material use
+    /// [`identify_scale`], which derives the collection from what is actually
+    /// played instead of assuming one of these two.
     pub fn scale(&self) -> Vec<u8> {
         let steps: &[u8] = if self.is_minor {
             &[0, 2, 3, 5, 7, 8, 10]
@@ -84,6 +88,190 @@ impl KeyEstimate {
         };
         steps.iter().map(|s| (self.tonic + s) % 12).collect()
     }
+}
+
+/// A scale collection and the names of its rotations.
+///
+/// The correlation above can only ever answer "major" or "minor", so a Dorian
+/// set gets fitted to the nearest minor and its characteristic sixth reported
+/// as foreign. Matching the played pitch classes against these collections
+/// instead names the mode from what is there.
+struct Collection {
+    name: &'static str,
+    /// Semitones above the collection's own root.
+    intervals: &'static [u8],
+    /// `(semitones of the tonic above the root, mode name, how commonly used)`.
+    /// The rank breaks ties when a set fits several collections; lower is more
+    /// common, which is a prior, not a fact about the music.
+    modes: &'static [(u8, &'static str, u8)],
+}
+
+const COLLECTIONS: &[Collection] = &[
+    Collection {
+        name: "diatonic",
+        intervals: &[0, 2, 4, 5, 7, 9, 11],
+        modes: &[
+            (0, "Ionian (major)", 0),
+            (9, "Aeolian (natural minor)", 1),
+            (2, "Dorian", 2),
+            (7, "Mixolydian", 3),
+            (5, "Lydian", 4),
+            (4, "Phrygian", 5),
+            (11, "Locrian", 6),
+        ],
+    },
+    Collection {
+        name: "pentatonic",
+        intervals: &[0, 2, 4, 7, 9],
+        modes: &[(0, "major pentatonic", 7), (9, "minor pentatonic", 8)],
+    },
+    Collection {
+        name: "blues",
+        intervals: &[0, 3, 5, 6, 7, 10],
+        modes: &[(0, "blues", 9)],
+    },
+    Collection {
+        name: "harmonic minor",
+        intervals: &[0, 2, 3, 5, 7, 8, 11],
+        modes: &[
+            (0, "harmonic minor", 10),
+            (7, "Phrygian dominant", 11),
+            (5, "Ukrainian Dorian", 18),
+        ],
+    },
+    Collection {
+        name: "melodic minor",
+        intervals: &[0, 2, 3, 5, 7, 9, 11],
+        modes: &[
+            (0, "melodic minor", 12),
+            (5, "Lydian dominant", 13),
+            (11, "altered", 14),
+        ],
+    },
+    Collection {
+        name: "whole tone",
+        intervals: &[0, 2, 4, 6, 8, 10],
+        modes: &[(0, "whole tone", 19)],
+    },
+];
+
+/// A named scale derived from the notes actually played.
+#[derive(Debug, Clone)]
+pub struct ScaleEstimate {
+    pub tonic: u8,
+    /// e.g. "Dorian", or "mode of harmonic minor" where the rotation has no
+    /// name worth quoting.
+    pub mode: String,
+    /// e.g. "diatonic".
+    pub collection: &'static str,
+    /// Pitch classes of the scale, tonic first.
+    pub scale: Vec<u8>,
+    /// Played notes that fall outside the collection: chromatic colour, or a
+    /// sign the reading is wrong.
+    pub chromatic: Vec<u8>,
+    /// True when the played set fills the collection exactly, so the rotation
+    /// is determined rather than inferred.
+    pub exact: bool,
+    /// Other readings that also contain every played note.
+    pub alternatives: Vec<String>,
+}
+
+impl ScaleEstimate {
+    pub fn name(&self) -> String {
+        format!("{} {}", PITCH_NAMES[self.tonic as usize], self.mode)
+    }
+}
+
+fn rotate(root: u8, intervals: &[u8]) -> Vec<u8> {
+    intervals.iter().map(|s| (root + s) % 12).collect()
+}
+
+/// Name the scale formed by the played pitch classes around a known tonic.
+///
+/// The tonic comes from the correlation, which is reliable; only the mode is
+/// in question. Candidates are ranked by how many played notes fall outside
+/// the collection, then by how much of the collection is unaccounted for, so
+/// an exact fit always beats a superset that merely contains the notes.
+pub fn identify_scale(weights: &[f64; 12], tonic: u8) -> Option<ScaleEstimate> {
+    let played: Vec<u8> = (0..12u8).filter(|&pc| weights[pc as usize] > 0.0).collect();
+    if played.is_empty() {
+        return None;
+    }
+
+    struct Candidate {
+        outside: Vec<u8>,
+        unfilled: usize,
+        rank: u8,
+        mode: String,
+        collection: &'static str,
+        scale: Vec<u8>,
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for collection in COLLECTIONS {
+        for root in 0..12u8 {
+            let pitches = rotate(root, collection.intervals);
+            // The tonic has to belong to the collection, or naming a rotation
+            // around it is meaningless.
+            if !pitches.contains(&tonic) {
+                continue;
+            }
+            let offset = (tonic + 12 - root) % 12;
+            let named = collection.modes.iter().find(|(o, _, _)| *o == offset);
+            let (mode, rank) = match named {
+                Some((_, name, rank)) => ((*name).to_string(), *rank),
+                // An unnamed rotation is still a true description, just a less
+                // useful one, so keep it but rank it last.
+                None => (
+                    format!(
+                        "mode {} of {}",
+                        collection.intervals.iter().position(|s| *s == offset).map_or(0, |i| i + 1),
+                        collection.name
+                    ),
+                    30,
+                ),
+            };
+
+            let outside: Vec<u8> = played.iter().copied().filter(|pc| !pitches.contains(pc)).collect();
+            let unfilled = pitches.iter().filter(|pc| !played.contains(pc)).count();
+
+            // Rotate the scale so it reads from the tonic.
+            let mut scale = pitches.clone();
+            scale.sort_by_key(|pc| (pc + 12 - tonic) % 12);
+
+            candidates.push(Candidate {
+                outside,
+                unfilled,
+                rank,
+                mode,
+                collection: collection.name,
+                scale,
+            });
+        }
+    }
+
+    candidates.sort_by_key(|c| (c.outside.len(), c.unfilled, c.rank));
+    let best = candidates.first()?;
+
+    // Readings that account for every played note just as well, which is what
+    // makes a five-note set genuinely underdetermined.
+    let alternatives: Vec<String> = candidates
+        .iter()
+        .skip(1)
+        .filter(|c| c.outside.len() == best.outside.len() && c.mode != best.mode)
+        .map(|c| format!("{} {}", PITCH_NAMES[tonic as usize], c.mode))
+        .take(4)
+        .collect();
+
+    Some(ScaleEstimate {
+        tonic,
+        mode: best.mode.clone(),
+        collection: best.collection,
+        scale: best.scale.clone(),
+        chromatic: best.outside.clone(),
+        exact: best.outside.is_empty() && best.unfilled == 0,
+        alternatives,
+    })
 }
 
 /// Estimate the key by correlating the histogram against all 24 profiles.
@@ -257,7 +445,7 @@ mod tests {
         assert_eq!(name_chord(&[7, 11, 2, 5], None).unwrap().0, "G7");
         // D F A C
         assert_eq!(name_chord(&[2, 5, 9, 0], None).unwrap().0, "Dmin7");
-        // C F G — sus4, not a weak triad
+        // C F G, sus4, not a weak triad
         assert_eq!(name_chord(&[0, 5, 7], None).unwrap().0, "Csus4");
     }
 
@@ -303,6 +491,127 @@ mod tests {
     #[test]
     fn key_estimation_is_none_for_silence() {
         assert!(estimate_key(&pitch_class_weights(&[])).is_none());
+    }
+
+    /// Build a weight table from pitch-class percentages.
+    fn weights_of(pairs: &[(u8, f64)]) -> [f64; 12] {
+        let mut weights = [0.0; 12];
+        for &(pc, weight) in pairs {
+            weights[pc as usize] = weight;
+        }
+        weights
+    }
+
+    #[test]
+    fn names_dorian_rather_than_a_minor_key_with_a_wrong_sixth() {
+        // The exact pitch content of a real 5/4 set: B C# D E F# G# A, no G.
+        // The correlation calls this B minor and reports the G# as foreign,
+        // when G# is precisely what makes it Dorian.
+        let weights = weights_of(&[
+            (11, 24.8), (6, 22.9), (2, 22.0), (1, 19.2), (8, 5.6), (4, 3.3), (9, 2.3),
+        ]);
+        let tonic = estimate_key(&weights).unwrap().tonic;
+        assert_eq!(PITCH_NAMES[tonic as usize], "B", "the tonic was always right");
+
+        let scale = identify_scale(&weights, tonic).unwrap();
+        assert_eq!(scale.name(), "B Dorian");
+        assert_eq!(scale.collection, "diatonic");
+        assert!(scale.exact, "all seven degrees are played, so the mode is pinned down");
+        assert!(scale.chromatic.is_empty(), "G# belongs to the scale, it is not an outlier");
+        assert_eq!(
+            scale.scale.iter().map(|&pc| PITCH_NAMES[pc as usize]).collect::<Vec<_>>(),
+            ["B", "C#", "D", "E", "F#", "G#", "A"],
+        );
+    }
+
+    #[test]
+    fn names_each_diatonic_mode_from_its_own_notes() {
+        // Every mode of the C-major collection, rooted on its own tonic.
+        for (tonic, expected) in [
+            (0u8, "C Ionian (major)"),
+            (2, "D Dorian"),
+            (4, "E Phrygian"),
+            (5, "F Lydian"),
+            (7, "G Mixolydian"),
+            (9, "A Aeolian (natural minor)"),
+            (11, "B Locrian"),
+        ] {
+            let weights = weights_of(&[
+                (0, 1.0), (2, 1.0), (4, 1.0), (5, 1.0), (7, 1.0), (9, 1.0), (11, 1.0),
+            ]);
+            let scale = identify_scale(&weights, tonic).unwrap();
+            assert_eq!(scale.name(), expected);
+            assert!(scale.exact);
+        }
+    }
+
+    #[test]
+    fn a_partial_scale_is_reported_as_undetermined_with_alternatives() {
+        // C E G only: consistent with several collections, so the mode cannot
+        // be pinned down and saying "C major" outright would overreach.
+        let weights = weights_of(&[(0, 3.0), (4, 2.0), (7, 2.0)]);
+        let scale = identify_scale(&weights, 0).unwrap();
+        assert!(!scale.exact, "three notes do not determine a seven-note mode");
+        assert!(
+            !scale.alternatives.is_empty(),
+            "other readings fit these notes equally well"
+        );
+        assert!(scale.chromatic.is_empty(), "the notes themselves are all diatonic");
+    }
+
+    #[test]
+    fn chromatic_notes_are_reported_rather_than_forced_into_a_scale() {
+        // A C-major scale plus a chromatic F#, which no diatonic rotation
+        // containing C, D, E, F, G, A and B can absorb.
+        let weights = weights_of(&[
+            (0, 5.0), (2, 2.0), (4, 3.0), (5, 2.0), (7, 3.0), (9, 2.0), (11, 2.0), (6, 0.5),
+        ]);
+        let scale = identify_scale(&weights, 0).unwrap();
+        assert_eq!(
+            scale.chromatic.iter().map(|&pc| PITCH_NAMES[pc as usize]).collect::<Vec<_>>(),
+            ["F#"],
+        );
+        assert_eq!(scale.name(), "C Ionian (major)");
+    }
+
+    #[test]
+    fn recognises_pentatonic_and_harmonic_minor_collections() {
+        // Exactly the five notes of a major pentatonic beats calling it a
+        // major scale with two degrees missing.
+        let pentatonic = weights_of(&[(0, 2.0), (2, 1.0), (4, 1.0), (7, 1.0), (9, 1.0)]);
+        let scale = identify_scale(&pentatonic, 0).unwrap();
+        assert_eq!(scale.name(), "C major pentatonic");
+        assert!(scale.exact);
+
+        // A natural minor with a raised seventh is harmonic minor, not a
+        // chromatic accident.
+        let harmonic = weights_of(&[
+            (9, 4.0), (11, 2.0), (0, 2.0), (2, 2.0), (4, 3.0), (5, 2.0), (8, 2.0),
+        ]);
+        let scale = identify_scale(&harmonic, 9).unwrap();
+        assert_eq!(scale.name(), "A harmonic minor");
+        assert!(scale.chromatic.is_empty());
+    }
+
+    #[test]
+    fn the_tonic_must_belong_to_the_scale_it_names() {
+        let weights = weights_of(&[
+            (0, 1.0), (2, 1.0), (4, 1.0), (5, 1.0), (7, 1.0), (9, 1.0), (11, 1.0),
+        ]);
+        for tonic in [0u8, 2, 4, 5, 7, 9, 11] {
+            let scale = identify_scale(&weights, tonic).unwrap();
+            assert!(
+                scale.scale.contains(&tonic),
+                "{} is not in the scale named for it",
+                PITCH_NAMES[tonic as usize]
+            );
+            assert_eq!(scale.scale[0], tonic, "the scale should read from its tonic");
+        }
+    }
+
+    #[test]
+    fn identify_scale_is_none_for_silence() {
+        assert!(identify_scale(&[0.0; 12], 0).is_none());
     }
 
     #[test]

@@ -8,7 +8,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "get_tracks",
             "get_tracks",
-            "List every track — regular, return and master — with its index, name, colour, \
+            "List every track (regular, return and master) with its index, name, colour, \
              type, mixer state and arm/mute/solo flags.",
         )
         .read_only()
@@ -76,7 +76,7 @@ pub fn tools() -> Vec<ToolDef> {
         .track_ref()
         .opt_num(
             "volume",
-            "Fader position from 0.0 to 1.0 — not decibels. 0.85 is unity (0 dB), 1.0 is +6 dB.",
+            "Fader position from 0.0 to 1.0, not decibels. 0.85 is unity (0 dB), 1.0 is +6 dB.",
         )
         .opt_num("panning", "-1.0 hard left, 0.0 centre, 1.0 hard right.")
         .opt_bool("mute", "Mute the track.")
@@ -102,7 +102,7 @@ pub fn tools() -> Vec<ToolDef> {
             "get_track_routing",
             "get_track_routing",
             "Read a track's input and output routing, together with every routing type and \
-             channel Live will accept for it. Call this before `set_track_routing` — the valid \
+             channel Live will accept for it. Call this before `set_track_routing`. The valid \
              names depend on the set's tracks and the machine's audio and MIDI hardware.",
         )
         .read_only()
@@ -111,7 +111,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "set_track_routing",
             "set_track_routing",
-            "Point a track's input or output somewhere else — feeding a track into another \
+            "Point a track's input or output somewhere else: feeding a track into another \
              track, picking a hardware input, or choosing a MIDI channel. Names must match \
              those reported by `get_track_routing` exactly.",
         )

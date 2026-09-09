@@ -100,7 +100,7 @@ pub const GROUPS: &[&str] = &[
 ];
 
 /// Filter [`all`] down to a comma-separated set of groups. `meta` is always
-/// kept — without it a client cannot check which Remote Script it is talking to.
+/// kept, without it a client cannot check which Remote Script it is talking to.
 pub fn selected(spec: Option<&str>) -> Vec<ToolDef> {
     let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty() && *s != "all") else {
         return all();

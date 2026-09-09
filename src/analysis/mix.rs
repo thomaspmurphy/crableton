@@ -1,7 +1,7 @@
 //! Mix analysis: register crowding and gain staging.
 //!
 //! All of this is arithmetic on what Live already reports. It cannot tell you
-//! the mix sounds muddy — only that five parts are competing for the same two
+//! the mix sounds muddy, only that five parts are competing for the same two
 //! octaves, which is the measurable half of that judgement.
 
 use serde_json::{Value, json};

@@ -2,7 +2,7 @@
 
 Everything here runs without Ableton: `_Framework` is stubbed out so the module
 imports, and only the functions that do not touch Live's object model are
-exercised. That covers the parts most likely to be wrong — envelope step
+exercised. That covers the parts most likely to be wrong, envelope step
 generation, note validation and the wire framing.
 
 Run with: python3 remote_script/test_remote_script.py

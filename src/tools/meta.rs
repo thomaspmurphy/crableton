@@ -17,7 +17,7 @@ pub fn tools() -> Vec<ToolDef> {
             "batch",
             "Run several tools as one operation. Every step executes in a single pass on \
              Live's main thread, so a sequence that would otherwise cost one round trip and \
-             one audio-thread tick each is applied at once — far faster, and the user sees a \
+             one audio-thread tick each is applied at once. Far faster, and the user sees a \
              single change rather than a flicker of intermediate states. Prefer this whenever \
              you are making more than two edits. Steps run in order and each result is \
              returned positionally; a step that fails stops the batch unless \
@@ -38,7 +38,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "lom_reference",
             "__local_lom",
-            "Look up Ableton's Live Object Model — the API surface the Remote Script drives: \
+            "Look up Ableton's Live Object Model, the API surface the Remote Script drives: \
              which properties and methods exist on Song, Track, Clip, Device, DeviceParameter, \
              Scene and friends, their types, and whether they are writable. Use this to \
              understand what is and is not reachable in Live before assuming a tool is missing, \
@@ -63,7 +63,7 @@ pub fn tools() -> Vec<ToolDef> {
             "Report what a Live object actually offers in *this* Live version: its class, its \
              readable properties with current values, and its methods. Where `lom_reference` \
              is a bundled description of the API in general, this interrogates the running \
-             instance — use it when a property is missing, a value is not what you expected, \
+             instance, use it when a property is missing, a value is not what you expected, \
              or the docs and reality disagree. The `envelopes` target lists every automation \
              envelope a clip carries and what each one automates, which is the only way to \
              see the automation on a placed Arrangement clip.",

@@ -48,7 +48,7 @@ fn registered_handlers() -> HashSet<String> {
     }
     assert!(
         found.len() > 50,
-        "only parsed {} handlers — the table's shape has changed",
+        "only parsed {} handlers, the table's shape has changed",
         found.len()
     );
     found

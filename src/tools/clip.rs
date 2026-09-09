@@ -13,7 +13,7 @@ pub fn tools() -> Vec<ToolDef> {
             "get_clip",
             "get_clip",
             "Everything about one clip: name, colour, length, loop and marker positions, launch \
-             settings, follow actions, and — for audio clips — warp mode, gain and pitch.",
+             settings, follow actions, and, for audio clips, warp mode, gain and pitch.",
         )
         .read_only()
         .clip_ref(),
@@ -21,7 +21,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "create_clip",
             "create_clip",
-            "Create an empty MIDI clip in a Session clip slot. The slot must be empty — delete \
+            "Create an empty MIDI clip in a Session clip slot. The slot must be empty, delete \
              what is there first if you mean to replace it.",
         )
         .track_ref()
@@ -59,7 +59,7 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "set_clip_properties",
             "set_clip_properties",
-            "Change any combination of a clip's properties in one call — name and colour, loop \
+            "Change any combination of a clip's properties in one call, name and colour, loop \
              and markers, launch behaviour, follow actions, and audio warping. Omit anything \
              you do not want to touch. Audio-only fields are rejected on MIDI clips.",
         )
@@ -155,7 +155,7 @@ pub fn tools() -> Vec<ToolDef> {
             "set_clip_envelope",
             "set_clip_envelope",
             "Write clip automation for one parameter, replacing any existing envelope. This is \
-             how you draw a filter sweep, a volume fade or any other moving value — including \
+             how you draw a filter sweep, a volume fade or any other moving value, including \
              track volume and pan, via `device_index: -1`.\n\n\
              Give the shape as breakpoints and it is filled in for you. Live's automation API \
              only writes stepped values, so a smooth ramp is many small steps: with \
@@ -164,7 +164,7 @@ pub fn tools() -> Vec<ToolDef> {
              1/16 of a beat is smooth enough for filter sweeps and fades.\n\n\
              Automation is per clip and its times are relative to the clip's own start, not \
              the Arrangement.\n\n\
-             Live only creates clip automation on **Session** clips — it refuses on \
+             Live only creates clip automation on **Session** clips, it refuses on \
              Arrangement clips. So the order matters: write the envelope on the Session clip \
              first, then `duplicate_clip_to_arrangement`, and every copy carries it. An \
              Arrangement clip that is already placed cannot be automated through the API.",
@@ -175,8 +175,8 @@ pub fn tools() -> Vec<ToolDef> {
         .points(
             "points",
             "Breakpoints as [time_in_beats, value] pairs in ascending time order, with times \
-             relative to the clip start. Values are in the parameter's own units — check them \
-             with `get_device_parameters` — and are clamped to its range. A single breakpoint \
+             relative to the clip start. Values are in the parameter's own units, check them \
+             with `get_device_parameters`, and are clamped to its range. A single breakpoint \
              holds one constant value across the clip.",
         )
         .opt_text(

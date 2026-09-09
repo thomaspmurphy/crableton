@@ -160,7 +160,7 @@ async fn live_side_errors_surface_without_killing_the_connection() {
     let error = client.send("explode", json!({})).await.unwrap_err();
     assert!(error.to_string().contains("clip slot 3 is occupied"));
 
-    // The socket was fine — only the command failed — so it should be reused.
+    // The socket was fine, only the command failed, so it should be reused.
     client.send("set_tempo", json!({ "tempo": 128 })).await.unwrap();
     assert_eq!(live.connections.load(Ordering::SeqCst), 1);
 }

@@ -1,7 +1,6 @@
 //! Musical analysis computed from a single session snapshot.
 //!
-//! The division of labour here is deliberate: these tools report *facts* —
-//! what the notes are, when parts enter, which registers overlap — and leave
+//! The division of labour here is deliberate: these tools report *facts*, //! what the notes are, when parts enter, which registers overlap, and leave
 //! the judgement to the caller. Taste does not belong in a server.
 //!
 //! It all runs off one `get_session_snapshot` call, so the large payload stays
@@ -292,33 +291,63 @@ pub fn analyze_harmony(snapshot: &Snapshot, track: Option<usize>, max_bars: usiz
     });
 
     if let Some(key) = key {
-        // Notes outside the estimated scale: often deliberate colour, and
-        // sometimes the reason the key estimate is shaky.
-        let scale = key.scale();
-        let outside: Vec<Value> = (0..12u8)
-            .filter(|pc| weights[*pc as usize] > 0.0 && !scale.contains(pc))
-            .map(|pc| {
-                json!({
-                    "pitch": PITCH_NAMES[pc as usize],
-                    "weight_percent": ((weights[pc as usize] / total) * 1000.0).round() / 10.0,
-                })
-            })
-            .collect();
+        let weight_of = |pc: u8| ((weights[pc as usize] / total) * 1000.0).round() / 10.0;
 
-        result["key"] = json!({
-            "estimate": key.name(),
-            "confidence": (key.correlation * 100.0).round() / 100.0,
-            "margin_over_runner_up": (key.margin * 100.0).round() / 100.0,
-            "ambiguous": key.margin < 0.05,
-            "scale_pitches": scale.iter().map(|&pc| PITCH_NAMES[pc as usize]).collect::<Vec<_>>(),
-            "notes_outside_the_scale": outside,
-        });
+        // The correlation locates the tonic reliably but can only ever answer
+        // "major" or "minor". The mode comes from the notes themselves, so
+        // that Dorian is named Dorian instead of a minor key with a wrong
+        // sixth, and the scale reported is one the music actually uses.
+        let scale = harmony::identify_scale(&weights, key.tonic);
+
+        result["key"] = match &scale {
+            Some(scale) => {
+                let chromatic: Vec<Value> = scale
+                    .chromatic
+                    .iter()
+                    .map(|&pc| json!({ "pitch": PITCH_NAMES[pc as usize], "weight_percent": weight_of(pc) }))
+                    .collect();
+
+                let mut key = json!({
+                    "estimate": scale.name(),
+                    "tonic": PITCH_NAMES[scale.tonic as usize],
+                    "mode": scale.mode,
+                    "collection": scale.collection,
+                    "scale_pitches": scale.scale.iter().map(|&pc| PITCH_NAMES[pc as usize]).collect::<Vec<_>>(),
+                    "notes_outside_the_scale": chromatic,
+                    "tonic_confidence": (key.correlation * 100.0).round() / 100.0,
+                    "tonic_margin_over_runner_up": (key.margin * 100.0).round() / 100.0,
+                    "tonic_ambiguous": key.margin < 0.05,
+                    // Distinct from the tonic being uncertain: the notes played
+                    // may simply not pin down which rotation this is.
+                    "mode_determined_by_the_notes": scale.exact,
+                });
+                if !scale.alternatives.is_empty() {
+                    key["equally_consistent_readings"] = json!(scale.alternatives);
+                }
+                if !scale.exact && scale.chromatic.is_empty() {
+                    key["note"] = json!(
+                        "Not every degree of the collection is played, so the mode is inferred \
+                         rather than pinned down. The alternatives listed fit the notes just \
+                         as well."
+                    );
+                }
+                key
+            }
+            // No pitch content at all; fall back to reporting the correlation.
+            None => json!({
+                "estimate": key.name(),
+                "tonic_confidence": (key.correlation * 100.0).round() / 100.0,
+                "scale_pitches": key.scale().iter().map(|&pc| PITCH_NAMES[pc as usize]).collect::<Vec<_>>(),
+            }),
+        };
     }
 
     result["caveat"] = json!(
-        "Key and chord names are inferred from pitch content alone — no voicing, register or \
-         rhythmic weight beyond note length. Ambiguous or modal material will read \
-         approximately."
+        "Key and chord names are inferred from pitch content alone, with no voicing or \
+         register and no rhythmic weight beyond note length. The tonic comes from profile \
+         correlation and the mode from the played pitch classes, so heavily chromatic \
+         material, or a passage using only part of its scale, will read approximately. \
+         Check `mode_determined_by_the_notes` before relying on the mode."
     );
     result
 }
@@ -395,21 +424,73 @@ mod tests {
         assert_eq!(listed[0]["bar"], 17, "beat 64 is bar 17 in 4/4");
     }
 
+    /// A clip of `(pitch, start, duration)` notes, as the Remote Script sends them.
+    fn set_of(notes: &[(u8, f64, f64)]) -> Snapshot {
+        let notes: Vec<Value> = notes
+            .iter()
+            .map(|&(pitch, start, duration)| {
+                json!({ "pitch": pitch, "start_time": start, "duration": duration })
+            })
+            .collect();
+        Snapshot::from_value(&json!({
+            "tracks": [{ "name": "Lead", "session_clips": [{ "notes": notes }] }]
+        }))
+    }
+
     #[test]
-    fn out_of_scale_notes_are_surfaced() {
-        let raw = json!({
-            "tracks": [{
-                "name": "Lead",
-                "session_clips": [{ "notes": [
-                    { "pitch": 60, "start_time": 0.0, "duration": 4.0 },
-                    { "pitch": 64, "start_time": 0.0, "duration": 4.0 },
-                    { "pitch": 67, "start_time": 0.0, "duration": 4.0 },
-                    { "pitch": 66, "start_time": 4.0, "duration": 1.0 }
-                ]}]
-            }]
-        });
-        let result = analyze_harmony(&Snapshot::from_value(&raw), None, 8);
+    fn genuinely_chromatic_notes_are_surfaced() {
+        // A full C major scale with a passing F#. No diatonic rotation can
+        // hold C, D, E, F, G, A, B and F# at once, so the F# is chromatic.
+        let mut notes: Vec<(u8, f64, f64)> = [60u8, 62, 64, 65, 67, 69, 71]
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, i as f64 * 4.0, 4.0))
+            .collect();
+        notes.push((66, 28.0, 0.5));
+
+        let result = analyze_harmony(&set_of(&notes), None, 16);
         let outside = result["key"]["notes_outside_the_scale"].as_array().unwrap();
-        assert!(!outside.is_empty(), "F# against a C triad should be flagged");
+        assert_eq!(outside.len(), 1, "only the F# is chromatic here");
+        assert_eq!(outside[0]["pitch"], "F#");
+    }
+
+    #[test]
+    fn a_raised_fourth_reads_as_lydian_rather_than_a_wrong_note() {
+        // The whole point of the mode detection: an F# over a C tonic is the
+        // Lydian fourth when the rest of the material supports it, not an
+        // outlier against an assumed C major.
+        //
+        // The tonic has to be audible in the weighting for this to work. The
+        // same seven notes played evenly are just the G-major collection with
+        // no tonal centre, and the correlation will rightly say so, which is
+        // why real Lydian writing leans on its tonic.
+        let mut notes: Vec<(u8, f64, f64)> = [60u8, 62, 64, 66, 67, 69, 71]
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, i as f64 * 4.0, 4.0))
+            .collect();
+        for bar in 0..4 {
+            notes.push((60, 28.0 + bar as f64 * 8.0, 8.0));
+        }
+
+        let key = &analyze_harmony(&set_of(&notes), None, 16)["key"];
+        assert_eq!(key["estimate"], "C Lydian");
+        assert_eq!(key["mode"], "Lydian");
+        assert_eq!(key["mode_determined_by_the_notes"], true);
+        assert!(
+            key["notes_outside_the_scale"].as_array().unwrap().is_empty(),
+            "every note belongs to the mode"
+        );
+        assert_eq!(key["scale_pitches"][3], "F#", "the fourth degree is raised");
+    }
+
+    #[test]
+    fn an_underdetermined_mode_says_so_and_offers_the_alternatives() {
+        // A bare triad cannot pin down a seven-note mode.
+        let result = analyze_harmony(&set_of(&[(60, 0.0, 4.0), (64, 0.0, 4.0), (67, 0.0, 4.0)]), None, 8);
+        let key = &result["key"];
+        assert_eq!(key["mode_determined_by_the_notes"], false);
+        assert!(key["equally_consistent_readings"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(key["note"].as_str().unwrap().contains("inferred"));
     }
 }

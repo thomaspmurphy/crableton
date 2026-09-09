@@ -17,7 +17,7 @@ pub fn tools() -> Vec<ToolDef> {
             "Work out what the MIDI in the set actually is, harmonically: the estimated key \
              with a confidence and whether it is ambiguous, the chord sounding in each bar, \
              which pitches carry the most weight, and any notes falling outside the estimated \
-             scale. Use it before writing parts that have to sit with what is already there — \
+             scale. Use it before writing parts that have to sit with what is already there, \
              it is the difference between guessing a key and knowing it.",
         )
         .read_only()
@@ -53,7 +53,7 @@ pub fn tools() -> Vec<ToolDef> {
             "Measure how the parts sit against each other: each track's pitch range and \
              duration-weighted centre, pairs of tracks competing for the same register, fader \
              positions in decibels, panning, and active sends. This is the measurable half of \
-             a mix judgement — it can tell you five pads are stacked in two octaves, which is \
+             a mix judgement. It can tell you five pads are stacked in two octaves, which is \
              usually why they sound congested, but it cannot hear the result.",
         )
         .read_only(),
