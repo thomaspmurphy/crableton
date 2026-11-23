@@ -18,8 +18,13 @@ cargo install --path .
 crableton install
 ```
 
-Restart Live, then under Settings > Link, Tempo & MIDI > Control Surface,
-choose `Crableton`. Check it worked:
+Restart Live, open Settings > Tempo & MIDI, and pick `Crableton` in any free
+Control Surface slot. Leave its Input and Output at `None`: the script talks
+to the MCP server over a local socket, not MIDI.
+
+![Live's Tempo & MIDI settings with Crableton chosen as a control surface](docs/images/control-surface.png)
+
+Check it worked:
 
 ```sh
 crableton doctor
