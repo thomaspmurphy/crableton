@@ -48,6 +48,12 @@ impl CommonArgs for ToolDef {
             .opt_text("view", "Which view the clip lives in.")
             .choices(&["session", "arrangement"])
             .default(json!("session"))
+            .opt_int(
+                "take_lane_index",
+                "Arrangement only: reach a clip on one of the track's take lanes, as listed \
+                 by `get_take_lanes`, instead of its main lane. `clip_index` then counts \
+                 that lane's clips.",
+            )
     }
 
     fn device_ref(self) -> Self {

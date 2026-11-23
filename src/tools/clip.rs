@@ -39,9 +39,14 @@ pub fn tools() -> Vec<ToolDef> {
         .int("clip_index", "0-based clip slot index. The slot must be empty.")
         .text("path", "Absolute path to an audio file Live can read, such as a .wav or .aif."),
 
-        ToolDef::new("delete_clip", "delete_clip", "Delete a clip, freeing its slot.")
-            .destructive()
-            .clip_ref(),
+        ToolDef::new(
+            "delete_clip",
+            "delete_clip",
+            "Delete a clip, freeing its slot or its place in the Arrangement. Take lane clips \
+             may not be deletable: Live 12.4's API offers no way to, and the error says so.",
+        )
+        .destructive()
+        .clip_ref(),
 
         ToolDef::new(
             "duplicate_clip",
@@ -61,11 +66,14 @@ pub fn tools() -> Vec<ToolDef> {
             "set_clip_properties",
             "Change any combination of a clip's properties in one call, name and colour, loop \
              and markers, launch behaviour, follow actions, and audio warping. Omit anything \
-             you do not want to touch. Audio-only fields are rejected on MIDI clips.",
+             you do not want to touch. Works on Arrangement clips too (`view: \"arrangement\"`). \
+             Audio-only fields are rejected on MIDI clips, and the launch and follow action \
+             fields on Arrangement clips, which are never launched. Live snaps colours to its \
+             own palette, so read the colour back from the reply.",
         )
         .clip_ref()
         .opt_text("name", "Clip name.")
-        .opt_int("color", "Colour as 0xRRGGBB.")
+        .opt_int("color", "Colour as 0xRRGGBB, snapped by Live to the nearest palette colour.")
         .opt_bool("muted", "Deactivate the clip without deleting it.")
         .opt_bool("looping", "Whether the clip loops.")
         .opt_num("loop_start", "Loop start in beats from the clip's origin.")
@@ -166,8 +174,11 @@ pub fn tools() -> Vec<ToolDef> {
              the Arrangement.\n\n\
              Live only creates clip automation on **Session** clips, it refuses on \
              Arrangement clips. So the order matters: write the envelope on the Session clip \
-             first, then `duplicate_clip_to_arrangement`, and every copy carries it. An \
-             Arrangement clip that is already placed cannot be automated through the API.",
+             first, then `duplicate_clip_to_arrangement`. Copies keep the envelope only on a \
+             track with no devices: with any instrument or effect on the track, Live strips \
+             clip envelopes from the copy. An Arrangement clip that already carries an envelope for the parameter can be \
+             rewritten in place; one without cannot be given one through the API. Track-level \
+             Arrangement automation is not reachable at all.",
         )
         .clip_ref()
         .int("device_index", "Device that owns the parameter, or -1 for the track's own mixer.")
@@ -195,7 +206,9 @@ pub fn tools() -> Vec<ToolDef> {
         ToolDef::new(
             "clear_clip_envelope",
             "clear_clip_envelope",
-            "Remove a clip's automation for one parameter, returning it to a static value.",
+            "Remove a clip's automation for one parameter, returning it to a static value. \
+             On an Arrangement clip this is one-way: Live will not create the envelope again, \
+             so to change its shape use `set_clip_envelope`, which rewrites it in place.",
         )
         .destructive()
         .clip_ref()
