@@ -174,7 +174,7 @@ fn run_install(user_library: Option<&std::path::Path>) -> Result<()> {
     println!();
     println!("Now, in Ableton Live:");
     println!("  1. Restart Live so it picks up the script.");
-    println!("  2. Settings > Link, Tempo & MIDI > Control Surface: choose \"Crableton\".");
+    println!("  2. Settings > Tempo & MIDI > Control Surface: choose \"Crableton\".");
     println!("  3. Run `crableton doctor` to confirm the connection.");
     Ok(())
 }

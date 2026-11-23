@@ -262,8 +262,10 @@
       "methods": [
         { "name": "get_notes_extended(from_pitch, pitch_span, from_time, time_span)", "type": "NoteSpecification list", "description": "Live 11+: read notes including per-note probability, velocity deviation and release velocity, each with a stable note id." },
         { "name": "add_new_notes(specification)", "description": "Live 11+: add notes with the extended per-note attributes." },
-        { "name": "apply_note_modifications(notes)", "description": "Live 11+: change existing notes in place, matched by note id." },
+        { "name": "get_notes_by_id(note_ids)", "type": "NoteSpecification list", "description": "Live 11+: read specific notes by id." },
+        { "name": "apply_note_modifications(notes)", "description": "Live 11+: change existing notes in place, matched by note id. From a Remote Script it takes the note vector a get_notes_* call returned, with its notes edited." },
         { "name": "remove_notes_extended(from_pitch, pitch_span, from_time, time_span)", "description": "Live 11+: delete the notes inside a pitch and time window." },
+        { "name": "remove_notes_by_id(note_ids)", "description": "Live 11+: delete specific notes by id." },
         { "name": "get_notes(from_time, from_pitch, time_span, pitch_span)", "type": "tuple list", "description": "Older API: notes as (pitch, start, duration, velocity, mute) tuples, without the extended attributes." },
         { "name": "set_notes(notes)", "description": "Older API: replace notes with a tuple list." },
         { "name": "select_all_notes()", "description": "Select every note in the clip." },
