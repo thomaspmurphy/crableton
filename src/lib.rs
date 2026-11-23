@@ -22,4 +22,4 @@ pub use mcp::{AbletonServer, ToolRegistry};
 /// The Remote Script shipped with this binary, and the version `crableton
 /// install` writes into Live's User Library.
 pub const REMOTE_SCRIPT: &str = include_str!("../remote_script/Crableton/__init__.py");
-pub const REMOTE_SCRIPT_VERSION: &str = "2.1.0";
+pub const REMOTE_SCRIPT_VERSION: &str = "2.2.0";

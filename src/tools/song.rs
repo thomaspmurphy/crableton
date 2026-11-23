@@ -95,7 +95,11 @@ pub fn tools() -> Vec<ToolDef> {
              anything you do not want to touch.",
         )
         .opt_bool("metronome", "Click on or off.")
-        .opt_bool("record_mode", "Arrangement record arm (the main Record button).")
+        .opt_bool(
+            "record_mode",
+            "The Arrangement Record button on its own. To arm tracks, position the playhead and \
+             start a take in one step, use `start_arrangement_recording`.",
+        )
         .opt_bool("session_record", "Session record arm.")
         .opt_bool("arrangement_overdub", "Overdub into existing Arrangement clips instead of replacing.")
         .opt_bool("session_automation_record", "Capture automation while recording in Session view.")

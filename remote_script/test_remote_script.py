@@ -34,12 +34,23 @@ class _MidiNoteSpecification(object):
         self.__dict__.update(fields)
 
 
+class _EnvelopeEvent(object):
+    def __init__(self, time, value):
+        self.time = time
+        self.value = value
+
+
 live = types.ModuleType("Live")
 live_clip = types.ModuleType("Live.Clip")
 live_clip.MidiNoteSpecification = _MidiNoteSpecification
+live_clip.Clip = type("Clip", (object,), {"automation_envelope": lambda self, p: None})
+live_envelope = types.ModuleType("Live.Envelope")
+live_envelope.EnvelopeEvent = _EnvelopeEvent
 live.Clip = live_clip
+live.Envelope = live_envelope
 sys.modules.setdefault("Live", live)
 sys.modules.setdefault("Live.Clip", live_clip)
+sys.modules.setdefault("Live.Envelope", live_envelope)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "Crableton"))
 import importlib.util
@@ -429,6 +440,754 @@ class ClipNotesTests(unittest.TestCase):
         result = script_for(clip)._get_clip_notes({}, None)
         self.assertEqual(result["notes"][0]["note_id"], 7)
 
+
+
+# ── A small fake Live set, for handlers that resolve their own clips ─────────
+
+
+class FakeEnvelope(object):
+    def __init__(self, parameter, events=()):
+        self.parameter = parameter
+        self.events = list(events)
+
+    def events_in_range(self, start, end):
+        return [types.SimpleNamespace(time=t, value=v)
+                for t, v in self.events if start <= t <= end]
+
+    def delete_events_in_range(self, start, end):
+        self.events = [(t, v) for t, v in self.events if not start <= t <= end]
+
+    def value_at_time(self, time_value):
+        """Linear between events, in parameter space; at exactly 0 Live
+        reports the parameter's static value instead."""
+        if time_value == 0:
+            return -99.0
+        events = sorted(self.events)
+        if time_value <= events[0][0]:
+            return events[0][1]
+        for (t0, v0), (t1, v1) in zip(events, events[1:]):
+            if t0 <= time_value <= t1:
+                return v0 if t1 == t0 else v0 + (v1 - v0) * (time_value - t0) / (t1 - t0)
+        return events[-1][1]
+
+    def create_event(self, event):
+        """Live 12's signature: one EnvelopeEvent, never (time, value)."""
+        if not isinstance(event, _EnvelopeEvent):
+            raise TypeError("did not match C++ signature: create_event(TEnvelopeEvent)")
+        self.events.append((event.time, event.value))
+
+
+class GainEnvelope(FakeEnvelope):
+    """As Live reports volume: events carry linear gain, not the parameter value."""
+
+    def events_in_range(self, start, end):
+        return [types.SimpleNamespace(time=t, value=10 ** ((v - 0.85) * 4))
+                for t, v in self.events if start <= t <= end]
+
+
+class NoValueAtTimeEnvelope(GainEnvelope):
+    def value_at_time(self, time_value):
+        raise RuntimeError("unavailable")
+
+
+class OldEnvelope(FakeEnvelope):
+    def create_event(self, time_value, value):
+        self.events.append((time_value, value))
+
+
+class StepEnvelope(FakeEnvelope):
+    """create_event refuses every form; only insert_step works."""
+
+    def create_event(self, *args):
+        raise TypeError("did not match C++ signature")
+
+    def insert_step(self, start, length, value):
+        self.events.append((start, value))
+
+
+class UnwritableEnvelope(FakeEnvelope):
+    def create_event(self, *args):
+        raise TypeError("did not match C++ signature")
+
+
+class FakeLiveClip(ExtendedClip):
+    """A MIDI clip with Live 11+ notes and per-clip automation.
+
+    Arrangement copies behave as Live does: `automation_envelope` will not
+    resolve their envelopes, and new ones cannot be created on them.
+    """
+
+    envelope_type = FakeEnvelope
+
+    def __init__(self, name="Clip", notes=(), start_time=None, length=4.0):
+        ExtendedClip.__init__(self, notes)
+        self.name = name
+        self.color = 0
+        self.muted = False
+        self.length = length
+        self.end_marker = length
+        self.loop_end = length
+        self.is_audio_clip = False
+        self.is_arrangement_clip = start_time is not None
+        if start_time is not None:
+            self.start_time = start_time
+            self.end_time = start_time + length
+        self.automation_envelopes = []
+        self.launch_mode = 0
+
+    def remove_notes_extended(self, from_pitch, pitch_span, from_time, time_span):
+        self.notes = [n for n in self.notes
+                      if not (from_pitch <= n.pitch < from_pitch + pitch_span
+                              and from_time <= n.start_time < from_time + time_span)]
+
+    def automation_envelope(self, parameter):
+        if self.is_arrangement_clip:
+            return None
+        return next((e for e in self.automation_envelopes if e.parameter is parameter), None)
+
+    def create_automation_envelope(self, parameter):
+        if self.is_arrangement_clip:
+            raise RuntimeError("Not a session clip or parameter belongs to another track")
+        envelope = self.envelope_type(parameter)
+        self.automation_envelopes.append(envelope)
+        return envelope
+
+    def clear_envelope(self, parameter):
+        self.automation_envelopes = [e for e in self.automation_envelopes
+                                     if e.parameter is not parameter]
+
+
+class FakeAudioClip(FakeLiveClip):
+    def __init__(self, path, start_time):
+        FakeLiveClip.__init__(self, path.rsplit("/", 1)[-1], (), start_time, 8.0)
+        self.is_midi_clip = False
+        self.is_audio_clip = True
+
+
+class FakeSlot(object):
+    def __init__(self, clip=None):
+        self.clip = clip
+
+    @property
+    def has_clip(self):
+        return self.clip is not None
+
+
+class ClipLane(object):
+    """What a track's main Arrangement lane and a take lane have in common."""
+
+    def __init__(self):
+        self._clips = []
+
+    @property
+    def arrangement_clips(self):
+        return sorted(self._clips, key=lambda c: c.start_time)
+
+    def create_midi_clip(self, start_time, length):
+        return self._place(FakeLiveClip("", (), start_time, length))
+
+    def create_audio_clip(self, path, start_time):
+        return self._place(FakeAudioClip(path, start_time))
+
+    def _place(self, clip):
+        clip.canonical_parent = self
+        self._clips.append(clip)
+        return clip
+
+
+class FakeTakeLane(ClipLane):
+    def __init__(self, name):
+        ClipLane.__init__(self)
+        self.name = name
+
+    def delete_clip(self, clip):
+        self._clips.remove(clip)
+
+
+class UndeletableTakeLane(ClipLane):
+    """A lane with no delete of its own, whose clips the track will not delete."""
+
+    def __init__(self, name):
+        ClipLane.__init__(self)
+        self.name = name
+
+
+class FakeTrack(ClipLane):
+    def __init__(self, name, midi=True, slots=2):
+        ClipLane.__init__(self)
+        self.name = name
+        self.has_midi_input = midi
+        self.has_audio_input = not midi
+        self.can_be_armed = True
+        self.arm = False
+        self.clip_slots = [FakeSlot() for _ in range(slots)]
+        self.take_lanes = []
+        self.volume = FakeParameter()
+        self.volume.name = "Track Volume"
+        self.panning = FakeParameter(-1.0, 1.0)
+        self.panning.name = "Track Panning"
+        self.mixer_device = types.SimpleNamespace(
+            volume=self.volume, panning=self.panning, track_activator=FakeParameter(),
+            sends=[])
+        self.devices = []
+
+    lane_type = FakeTakeLane
+
+    dropped_on_copy = ()
+
+    def duplicate_clip_to_arrangement(self, clip, at):
+        """As Live 12.4.6 did for a volume envelope: the copy carries the
+        clip's envelopes. `dropped_on_copy` simulates parameters whose envelope
+        does not survive."""
+        copy = FakeLiveClip(clip.name, list(clip.notes), at, clip.length)
+        copy.automation_envelopes = [
+            FakeEnvelope(e.parameter, e.events) for e in clip.automation_envelopes
+            if e.parameter not in self.dropped_on_copy]
+        self._place(copy)
+
+    def delete_clip(self, clip):
+        # As Live 12.4 does: a take lane's clip is silently left alone.
+        if clip in self._clips:
+            self._clips.remove(clip)
+
+    def create_take_lane(self):
+        lane = self.lane_type("Take %d" % (len(self.take_lanes) + 1))
+        self.take_lanes.append(lane)
+        return lane
+
+
+class FakeSong(object):
+    """With `lag`, transport and record changes land on the next tick, as in Live."""
+
+    def __init__(self, tracks):
+        self.tracks = tracks
+        self.return_tracks = []
+        self.master_track = None
+        self._record_mode = False
+        self.arrangement_overdub = False
+        self.is_playing = False
+        self.current_song_time = 0.0
+        self.started_from = None
+        self.lag = False
+        self.queued = []
+
+    def _later(self, change):
+        if self.lag:
+            self.queued.append(change)
+        else:
+            change()
+
+    def apply_queued(self):
+        queued, self.queued = self.queued, []
+        for change in queued:
+            change()
+
+    @property
+    def record_mode(self):
+        return self._record_mode
+
+    @record_mode.setter
+    def record_mode(self, value):
+        self._later(lambda: setattr(self, "_record_mode", value))
+
+    def start_playing(self):
+        def start():
+            self.is_playing = True
+            self.started_from = self.current_song_time
+        self._later(start)
+
+    def stop_playing(self):
+        self._later(lambda: setattr(self, "is_playing", False))
+
+
+class LiveSetScript(object):
+    """An AbletonMCP over a fake set, with deferred work run on demand."""
+
+    def __init__(self, tracks):
+        self.song = FakeSong(tracks)
+        self.script = AbletonMCP.__new__(AbletonMCP)
+        self.script._song_ref = self.song
+        self.script.log_message = lambda message: None
+        self.pending = []
+        self.script._defer = lambda ticks, fn: self.pending.append(fn)
+
+    def __getattr__(self, name):
+        handler = getattr(self.script, "_" + name)
+        return lambda params, respond=None: handler(params, respond)
+
+    def tick(self):
+        self.song.apply_queued()
+        pending, self.pending = self.pending, []
+        for fn in pending:
+            fn()
+
+    def settle(self, result, responses, ticks=10):
+        """Run ticks until a deferred handler answers; return its result."""
+        if result is not mcp.DEFERRED:
+            return result
+        for _ in range(ticks):
+            if responses:
+                break
+            self.tick()
+        return responses[0]["ok"]
+
+
+def a_set():
+    """Track 0: MIDI, a Session clip in slot 0 and two Arrangement clips.
+    Track 1: audio, empty."""
+    keys = FakeTrack("Keys")
+    keys.clip_slots[0].clip = FakeLiveClip("Session riff", [FakeNote(1, 60, 0.0)])
+    keys._clips = [
+        FakeLiveClip("Verse", [FakeNote(1, 60, 0.0), FakeNote(2, 64, 1.0)], 16.0),
+        FakeLiveClip("Intro", [FakeNote(1, 48, 0.0)], 0.0),
+    ]
+    return LiveSetScript([keys, FakeTrack("Vox", midi=False)])
+
+
+SESSION = {"track_index": 0, "clip_index": 0}
+ARRANGEMENT = {"track_index": 0, "clip_index": 1, "view": "arrangement"}
+
+
+class ArrangementClipResolutionTests(unittest.TestCase):
+    def test_arrangement_clips_are_counted_in_time_order(self):
+        live = a_set()
+        self.assertEqual(live.script._resolve_clip(ARRANGEMENT).name, "Verse")
+        self.assertEqual(live.script._resolve_clip(SESSION).name, "Session riff")
+
+    def test_take_lane_clips_are_reached_by_lane(self):
+        live = a_set()
+        lane = live.song.tracks[0].create_take_lane()
+        lane.create_midi_clip(8.0, 4.0).name = "Take"
+        clip = live.script._resolve_clip(dict(ARRANGEMENT, clip_index=0, take_lane_index=0))
+        self.assertEqual(clip.name, "Take")
+        with self.assertRaises(IndexError) as caught:
+            live.script._resolve_clip(dict(ARRANGEMENT, take_lane_index=0))
+        self.assertIn("take lane 0", str(caught.exception))
+
+    def test_a_take_lane_is_meaningless_in_the_session(self):
+        with self.assertRaises(ValueError) as caught:
+            a_set().script._resolve_clip(dict(SESSION, take_lane_index=0))
+        self.assertIn("arrangement", str(caught.exception))
+
+
+class CreateArrangementClipTests(unittest.TestCase):
+    def test_creates_a_midi_clip_and_reports_its_index(self):
+        live = a_set()
+        result = live.create_arrangement_clip({"track_index": 0, "start_time": 4.0, "length": 8.0})
+        self.assertEqual(result["clip_index"], 1)
+        self.assertEqual(result["view"], "arrangement")
+        self.assertEqual((result["clip"]["start_time"], result["clip"]["end_time"]), (4.0, 12.0))
+        # The reported index is the one the note tools then accept.
+        live.add_notes_to_clip(dict(ARRANGEMENT, notes=[{"pitch": 72, "start_time": 0, "duration": 1}]))
+        self.assertEqual([n.pitch for n in live.song.tracks[0].arrangement_clips[1].notes], [72])
+
+    def test_defaults_to_one_bar(self):
+        result = a_set().create_arrangement_clip({"track_index": 0, "start_time": 32.0})
+        self.assertEqual(result["clip"]["length"], 4.0)
+
+    def test_refuses_to_overlap_an_existing_clip(self):
+        live = a_set()
+        with self.assertRaises(ValueError) as caught:
+            live.create_arrangement_clip({"track_index": 0, "start_time": 14.0, "length": 4.0})
+        self.assertIn("'Verse' already occupies beats 16.0 to 20.0", str(caught.exception))
+        self.assertEqual(len(live.song.tracks[0].arrangement_clips), 2)
+        # Touching end to end is not an overlap.
+        live.create_arrangement_clip({"track_index": 0, "start_time": 12.0, "length": 4.0})
+
+    def test_rejects_bad_tracks_lengths_and_old_live(self):
+        live = a_set()
+        for params, expected in (
+            ({"track_index": 1, "start_time": 0}, "not a MIDI track"),
+            ({"track_index": 0, "start_time": 40, "length": 0}, "greater than"),
+            ({"track_index": 0, "start_time": -1}, "at least"),
+        ):
+            with self.assertRaises(ValueError) as caught:
+                live.create_arrangement_clip(params)
+            self.assertIn(expected, str(caught.exception))
+
+        old = LiveSetScript([types.SimpleNamespace(name="Old", has_midi_input=True,
+                                                   arrangement_clips=[])])
+        with self.assertRaises(RuntimeError) as caught:
+            old.create_arrangement_clip({"track_index": 0, "start_time": 0})
+        self.assertIn("duplicate_clip_to_arrangement", str(caught.exception))
+
+    def test_creates_on_a_take_lane(self):
+        live = a_set()
+        live.create_take_lane({"track_index": 0})
+        result = live.create_arrangement_clip(
+            {"track_index": 0, "start_time": 16.0, "take_lane_index": 0})
+        self.assertEqual((result["take_lane_index"], result["clip_index"]), (0, 0))
+        self.assertEqual(len(live.song.tracks[0].take_lanes[0].arrangement_clips), 1)
+        self.assertEqual(len(live.song.tracks[0].arrangement_clips), 2)
+
+    def test_imports_audio_at_a_position(self):
+        live = a_set()
+        result = live.create_arrangement_audio_clip(
+            {"track_index": 1, "path": "/samples/vox.wav", "start_time": 8.0})
+        self.assertEqual(result["clip"]["name"], "vox.wav")
+        self.assertTrue(result["clip"]["is_audio"])
+        with self.assertRaises(ValueError) as caught:
+            live.create_arrangement_audio_clip(
+                {"track_index": 1, "path": "/samples/b.wav", "start_time": 10.0})
+        self.assertIn("already occupies", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            live.create_arrangement_audio_clip(
+                {"track_index": 0, "path": "/samples/b.wav", "start_time": 0.0})
+        self.assertIn("not an audio track", str(caught.exception))
+
+
+class NoteToolsOnBothViewsTests(unittest.TestCase):
+    """Every note tool goes through _resolve_clip, so each must work on both."""
+
+    def check(self, run):
+        for where in (SESSION, ARRANGEMENT):
+            live = a_set()
+            clip = live.script._resolve_clip(where)
+            run(live, dict(where), clip)
+
+    def test_read_add_replace_clear(self):
+        def run(live, where, clip):
+            self.assertEqual(live.get_clip_notes(where)["note_count"], len(clip.notes))
+            live.add_notes_to_clip(dict(where, notes=[{"pitch": 70, "start_time": 2, "duration": 1}]))
+            self.assertIn(70, [n.pitch for n in clip.notes])
+            live.replace_clip_notes(dict(where, notes=[{"pitch": 40, "start_time": 0, "duration": 1}]))
+            self.assertEqual([n.pitch for n in clip.notes], [40])
+            live.clear_notes_from_clip(where)
+            self.assertEqual(clip.notes, [])
+        self.check(run)
+
+    def test_transpose_modify_and_remove_by_id(self):
+        def run(live, where, clip):
+            live.transpose_notes(dict(where, semitones=12))
+            self.assertEqual(clip.notes[0].pitch, 72)
+            live.modify_notes(dict(where, changes=[{"note_id": 1, "velocity": 50}]))
+            self.assertEqual(clip.notes[0].velocity, 50.0)
+            live.remove_notes_by_id(dict(where, note_ids=[1]))
+            self.assertNotIn(1, [n.note_id for n in clip.notes])
+        self.check(run)
+
+    def test_duplicate_extends_session_clips_but_never_arrangement_clips(self):
+        live = a_set()
+        result = live.duplicate_notes(dict(SESSION, time_offset=4))
+        self.assertEqual(result["extended"], "loop_end")
+
+        live = a_set()
+        clip = live.script._resolve_clip(ARRANGEMENT)
+        result = live.duplicate_notes(dict(ARRANGEMENT, time_offset=4))
+        self.assertTrue(result["past_clip_end"])
+        self.assertEqual((clip.loop_end, clip.end_time), (4.0, 20.0))
+        self.assertEqual(result["copied"], 2)
+
+
+class ArrangementClipPropertiesTests(unittest.TestCase):
+    def test_renames_and_mutes_clips_in_either_view(self):
+        for where in (SESSION, ARRANGEMENT):
+            live = a_set()
+            result = live.set_clip_properties(dict(where, name="Hook", muted=True))
+            self.assertEqual(sorted(result["changed"]), ["muted", "name"])
+            clip = live.script._resolve_clip(where)
+            self.assertEqual((clip.name, clip.muted), ("Hook", True))
+
+    def test_launch_settings_are_refused_on_arrangement_clips_only(self):
+        live = a_set()
+        live.set_clip_properties(dict(SESSION, launch_mode="gate"))
+        with self.assertRaises(ValueError) as caught:
+            live.set_clip_properties(dict(ARRANGEMENT, name="Hook", launch_mode="gate"))
+        self.assertIn("launch_mode only affects Session clips", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            live.set_clip_properties(dict(ARRANGEMENT, legato=True, launch_mode="gate"))
+        self.assertIn("launch_mode, legato only affect Session clips", str(caught.exception))
+        self.assertEqual(live.script._resolve_clip(ARRANGEMENT).name, "Verse")
+
+
+class ArrangementEnvelopeTests(unittest.TestCase):
+    MIXER_VOLUME = {"device_index": -1, "parameter_index": 0}
+
+    def live_with_placed_envelope(self):
+        """An Arrangement clip listing a volume envelope in its undocumented
+        `automation_envelopes` collection, under a parameter object other
+        than the track's."""
+        live = a_set()
+        copy_of_volume = FakeParameter()
+        copy_of_volume.name = "Track Volume"
+        clip = live.script._resolve_clip(ARRANGEMENT)
+        clip.automation_envelopes.append(FakeEnvelope(copy_of_volume, [(0.0, 0.2), (4.0, 0.8)]))
+        return live, clip
+
+    def test_reads_and_rewrites_a_placed_envelope_in_place(self):
+        live, clip = self.live_with_placed_envelope()
+        where = dict(ARRANGEMENT, **self.MIXER_VOLUME)
+        self.assertEqual(live.get_clip_envelope(where)["points"], [[0.0, 0.2], [4.0, 0.8]])
+        live.set_clip_envelope(dict(where, points=[[0, 1.0], [2, 0.0]]))
+        self.assertEqual(sorted(clip.automation_envelopes[0].events), [(0, 1.0), (2, 0.0), (4.0, 0.0)])
+
+    def test_creates_on_session_clips_and_explains_the_arrangement_refusal(self):
+        live = a_set()
+        live.set_clip_envelope(dict(SESSION, points=[[0, 0.5]], **self.MIXER_VOLUME))
+        self.assertTrue(live.get_clip_envelope(dict(SESSION, **self.MIXER_VOLUME))["has_envelope"])
+        with self.assertRaises(RuntimeError) as caught:
+            live.set_clip_envelope(dict(ARRANGEMENT, points=[[0, 0.5]], **self.MIXER_VOLUME))
+        self.assertIn("duplicate_clip_to_arrangement", str(caught.exception))
+
+    def test_writes_breakpoints_as_envelope_events(self):
+        live = a_set()
+        result = live.set_clip_envelope(
+            dict(SESSION, points=[[0, 0.2], [2, 0.9]], **self.MIXER_VOLUME))
+        self.assertEqual((result["wrote_as"], result["via"]), ("breakpoints", "EnvelopeEvent"))
+        clip = live.script._resolve_clip(SESSION)
+        self.assertEqual(clip.automation_envelopes[0].events, [(0.0, 0.2), (2.0, 0.9), (4.0, 0.9)])
+
+    def test_reads_back_what_was_written_in_parameter_units(self):
+        pan = {"device_index": -1, "parameter_index": 1}
+        for envelope_type in (FakeEnvelope, GainEnvelope):
+            live = a_set()
+            live.script._resolve_clip(SESSION).envelope_type = envelope_type
+            written = [[0.0, -0.5], [2.0, 0.75], [4.0, 0.25]]
+            live.set_clip_envelope(dict(SESSION, points=written, **pan))
+            read = live.get_clip_envelope(dict(SESSION, **pan))
+            self.assertEqual(read["points"], written, envelope_type.__name__)
+            self.assertNotIn("values", read)
+
+    def test_volume_reads_in_parameter_space_not_gain(self):
+        live = a_set()
+        live.script._resolve_clip(SESSION).envelope_type = GainEnvelope
+        live.set_clip_envelope(dict(SESSION, points=[[0, 0.3], [2, 0.9], [4, 0.5]],
+                                    **self.MIXER_VOLUME))
+        read = live.get_clip_envelope(dict(SESSION, **self.MIXER_VOLUME))
+        self.assertEqual(read["points"], [[0.0, 0.3], [2.0, 0.9], [4.0, 0.5]])
+
+    def test_without_value_at_time_raw_values_are_labelled(self):
+        live = a_set()
+        live.script._resolve_clip(SESSION).envelope_type = NoValueAtTimeEnvelope
+        live.set_clip_envelope(dict(SESSION, points=[[0, 0.85]], **self.MIXER_VOLUME))
+        read = live.get_clip_envelope(dict(SESSION, **self.MIXER_VOLUME))
+        self.assertEqual(read["values"], "internal")
+        self.assertEqual(read["points"][0], [0.0, 1.0])
+
+    def test_reports_clamped_values(self):
+        live = a_set()
+        result = live.set_clip_envelope(
+            dict(SESSION, points=[[0, 5], [2, 0.5], [3, -1]], **self.MIXER_VOLUME))
+        self.assertEqual(result["clamped"], 2)
+        result = live.set_clip_envelope(dict(SESSION, points=[[0, 0.5]], **self.MIXER_VOLUME))
+        self.assertNotIn("clamped", result)
+
+    def test_falls_back_to_the_old_signature_then_to_steps(self):
+        for envelope_type, via, wrote_as in ((OldEnvelope, "create_event(time, value)", "breakpoints"),
+                                             (StepEnvelope, "insert_step", "steps")):
+            live = a_set()
+            live.script._resolve_clip(SESSION).envelope_type = envelope_type
+            result = live.set_clip_envelope(
+                dict(SESSION, points=[[0, 0.0], [4, 1.0]], resolution=1.0, **self.MIXER_VOLUME))
+            self.assertEqual((result["via"], result["wrote_as"]), (via, wrote_as))
+            if wrote_as == "steps":
+                self.assertIn("stepped approximation", result["note"])
+                self.assertEqual(result["written"], 4)
+
+    def test_a_failed_write_leaves_no_empty_envelope(self):
+        live = a_set()
+        clip = live.script._resolve_clip(SESSION)
+        clip.envelope_type = UnwritableEnvelope
+        with self.assertRaises(RuntimeError):
+            live.set_clip_envelope(dict(SESSION, points=[[0, 0.5]], **self.MIXER_VOLUME))
+        self.assertEqual(clip.automation_envelopes, [])
+        self.assertFalse(live.get_clip_envelope(dict(SESSION, **self.MIXER_VOLUME))["has_envelope"])
+
+    def test_invalid_points_create_nothing(self):
+        live = a_set()
+        with self.assertRaises(ValueError):
+            live.set_clip_envelope(dict(SESSION, points=[], **self.MIXER_VOLUME))
+        self.assertEqual(live.script._resolve_clip(SESSION).automation_envelopes, [])
+
+    def test_clears_a_placed_envelope_by_its_own_parameter(self):
+        live, clip = self.live_with_placed_envelope()
+        result = live.clear_clip_envelope(dict(ARRANGEMENT, **self.MIXER_VOLUME))
+        self.assertTrue(result["cleared"])
+        self.assertIn("cannot be written again", result["note"])
+        self.assertEqual(clip.automation_envelopes, [])
+
+    def test_clearing_nothing_says_so(self):
+        for where in (SESSION, ARRANGEMENT):
+            result = a_set().clear_clip_envelope(dict(where, **self.MIXER_VOLUME))
+            self.assertFalse(result["cleared"])
+
+
+class DuplicateClipToArrangementTests(unittest.TestCase):
+    def test_an_occupied_span_is_refused_and_nothing_is_placed(self):
+        live = a_set()
+        with self.assertRaises(ValueError) as caught:
+            live.duplicate_clip_to_arrangement(
+                {"track_index": 0, "clip_index": 0, "destination_time": 14.0})
+        self.assertIn("'Verse' already occupies", str(caught.exception))
+        self.assertEqual(len(live.song.tracks[0].arrangement_clips), 2)
+
+    def test_copies_report_their_arrangement_clip_index(self):
+        live = a_set()
+        result = live.duplicate_clip_to_arrangement(
+            {"track_index": 0, "clip_index": 0, "destination_time": 4.0, "repeats": 2})
+        self.assertEqual(result["copies"], [{"clip_index": 1, "start_time": 4.0},
+                                            {"clip_index": 2, "start_time": 8.0}])
+        self.assertEqual(result["envelopes"], [])
+        self.assertNotIn("note", result)
+
+    def test_carried_envelopes_are_confirmed_on_every_copy(self):
+        live = a_set()
+        live.set_clip_envelope(dict(SESSION, points=[[0, 0.2], [4, 0.8]],
+                                    device_index=-1, parameter_index=0))
+        result = live.duplicate_clip_to_arrangement(
+            {"track_index": 0, "clip_index": 0, "destination_time": 4.0, "repeats": 2})
+        self.assertEqual(result["envelopes"], [
+            {"device": "Mixer", "parameter": "Track Volume",
+             "carried": True, "missing_on": []}])
+        self.assertNotIn("note", result)
+        read = live.get_clip_envelope(dict(ARRANGEMENT, clip_index=2,
+                                           device_index=-1, parameter_index=0))
+        self.assertTrue(read["has_envelope"])
+
+    def test_a_dropped_envelope_is_named(self):
+        live = a_set()
+        track = live.song.tracks[0]
+        live.set_clip_envelope(dict(SESSION, points=[[0, 0.2], [4, 0.8]],
+                                    device_index=-1, parameter_index=0))
+        track.dropped_on_copy = (track.volume,)
+        result = live.duplicate_clip_to_arrangement(
+            {"track_index": 0, "clip_index": 0, "destination_time": 4.0})
+        self.assertEqual(result["envelopes"], [
+            {"device": "Mixer", "parameter": "Track Volume",
+             "carried": False, "missing_on": [1]}])
+        self.assertIn("Mixer Track Volume", result["note"])
+
+
+class DeleteArrangementClipTests(unittest.TestCase):
+    def test_deletes_from_the_main_lane_or_a_take_lane(self):
+        live = a_set()
+        live.create_take_lane({"track_index": 0})
+        live.create_arrangement_clip({"track_index": 0, "start_time": 0, "take_lane_index": 0})
+        result = live.delete_clip(dict(ARRANGEMENT, clip_index=0, take_lane_index=0))
+        self.assertEqual(result["remaining"], 0)
+        self.assertEqual(len(live.song.tracks[0].arrangement_clips), 2)
+
+        result = live.delete_arrangement_clip({"track_index": 0, "clip_index": 0})
+        self.assertEqual((result["deleted"], result["remaining"]), ("Intro", 1))
+
+    def test_a_take_lane_clip_the_track_will_not_delete_is_an_error(self):
+        live = a_set()
+        live.song.tracks[0].lane_type = UndeletableTakeLane
+        live.create_take_lane({"track_index": 0})
+        live.create_arrangement_clip({"track_index": 0, "start_time": 0, "take_lane_index": 0})
+        with self.assertRaises(RuntimeError) as caught:
+            live.delete_clip(dict(ARRANGEMENT, clip_index=0, take_lane_index=0))
+        message = str(caught.exception)
+        self.assertIn("no way to delete a take lane clip", message)
+        self.assertIn("the take lane (UndeletableTakeLane) has no delete_clip", message)
+        self.assertIn("the track (FakeTrack).delete_clip left it in place", message)
+        self.assertIn("Delete it in Live itself", message)
+        self.assertEqual(len(live.song.tracks[0].take_lanes[0].arrangement_clips), 1)
+        self.assertEqual(len(live.song.tracks[0].arrangement_clips), 2)
+
+    def test_duplicate_clip_refuses_arrangement_clips(self):
+        with self.assertRaises(ValueError) as caught:
+            a_set().duplicate_clip(dict(ARRANGEMENT, target_clip_index=1))
+        self.assertIn("duplicate_clip_to_arrangement", str(caught.exception))
+
+
+class TakeLaneTests(unittest.TestCase):
+    def test_lists_lanes_with_their_clips(self):
+        live = a_set()
+        created = live.create_take_lane({"track_index": 0, "name": "Alt chorus"})
+        self.assertEqual((created["index"], created["name"], created["count"]), (0, "Alt chorus", 1))
+        live.create_take_lane({"track_index": 0})
+        live.create_arrangement_clip({"track_index": 0, "start_time": 4, "take_lane_index": 1})
+
+        listing = live.get_take_lanes({"track_index": 0})
+        self.assertEqual(listing["count"], 2)
+        self.assertEqual([l["clip_count"] for l in listing["take_lanes"]], [0, 1])
+        self.assertEqual(listing["take_lanes"][1]["clips"][0]["start_time"], 4)
+
+        clips = live.get_arrangement_clips({"track_index": 0, "take_lane_index": 1})
+        self.assertEqual((clips["count"], clips["take_lane_index"]), (1, 1))
+        self.assertEqual(live.get_arrangement_clips({"track_index": 0})["count"], 2)
+
+    def test_unknown_lanes_and_old_live_are_explained(self):
+        live = a_set()
+        with self.assertRaises(IndexError):
+            live.get_arrangement_clips({"track_index": 0, "take_lane_index": 0})
+        old = LiveSetScript([types.SimpleNamespace(name="Old")])
+        with self.assertRaises(RuntimeError) as caught:
+            old.get_take_lanes({"track_index": 0})
+        self.assertIn("take lanes", str(caught.exception))
+
+
+class ArrangementRecordingTests(unittest.TestCase):
+    def test_arms_presses_record_and_starts_the_transport(self):
+        live = a_set()
+        state = live.start_arrangement_recording({"arm_tracks": [0], "overdub": True})
+        self.assertTrue(state["recording"] and state["is_playing"])
+        self.assertTrue(live.song.arrangement_overdub)
+        self.assertEqual([t["name"] for t in state["armed_tracks"]], ["Keys"])
+        self.assertNotIn("warning", state)
+
+    def test_waits_for_the_playhead_before_recording_from_a_position(self):
+        live = a_set()
+        responses = []
+        result = live.start_arrangement_recording({"arm_tracks": [1], "from_time": 32.0},
+                                                  responses.append)
+        self.assertIs(result, mcp.DEFERRED)
+        self.assertFalse(live.song.record_mode)
+        state = live.settle(result, responses)
+        self.assertEqual(live.song.started_from, 32.0)
+        self.assertTrue(state["recording"])
+
+    def test_reports_the_state_once_live_has_applied_it(self):
+        live = a_set()
+        live.song.lag = True
+        responses = []
+        state = live.settle(
+            live.start_arrangement_recording({"arm_tracks": [0]}, responses.append), responses)
+        self.assertTrue(state["recording"] and state["is_playing"])
+
+        live.song.tracks[0].create_midi_clip(64.0, 8.0)  # the take, once stopped
+        responses = []
+        state = live.settle(
+            live.stop_arrangement_recording({"disarm": True}, responses.append), responses)
+        self.assertFalse(state["recording"] or state["is_playing"])
+        self.assertEqual(state["armed_tracks"][0]["arrangement_clip_count"], 3)
+        self.assertEqual(state["disarmed"], ["Keys"])
+
+    def test_inside_a_batch_reports_what_was_requested(self):
+        live = a_set()
+        live.song.lag = True
+        state = live.start_arrangement_recording({"arm_tracks": [0]})
+        self.assertTrue(state["recording"] and state["is_playing"])
+        self.assertIn("as requested", state["reported"])
+        state = live.stop_arrangement_recording({})
+        self.assertFalse(state["recording"] or state["is_playing"])
+
+    def test_bad_input_changes_nothing(self):
+        live = a_set()
+        with self.assertRaises(IndexError):
+            live.start_arrangement_recording({"arm_tracks": [0, 9]})
+        with self.assertRaises(RuntimeError) as caught:
+            live.start_arrangement_recording({"arm_tracks": [0], "from_time": 8})
+        self.assertIn("batch", str(caught.exception))
+        self.assertFalse(live.song.tracks[0].arm or live.song.record_mode)
+
+    def test_warns_when_nothing_is_armed(self):
+        state = a_set().start_arrangement_recording({})
+        self.assertIn("arm_tracks", state["warning"])
+
+    def test_stops_and_optionally_disarms(self):
+        live = a_set()
+        live.start_arrangement_recording({"arm_tracks": [0, 1]})
+        state = live.stop_arrangement_recording({"stop_playback": False, "disarm": True})
+        self.assertTrue(state["was_recording"])
+        self.assertFalse(live.song.record_mode)
+        self.assertTrue(live.song.is_playing)
+        self.assertEqual(state["disarmed"], ["Keys", "Vox"])
+        self.assertFalse(any(t.arm for t in live.song.tracks))
+
+        state = live.stop_arrangement_recording({})
+        self.assertFalse(state["was_recording"] or live.song.is_playing)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

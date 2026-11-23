@@ -150,6 +150,7 @@
       "children": [
         { "name": "clip_slots", "type": "ClipSlot list", "description": "Session clip slots, one per scene." },
         { "name": "arrangement_clips", "type": "Clip list", "description": "Clips on the Arrangement timeline, ordered by start time." },
+        { "name": "take_lanes", "type": "TakeLane list", "description": "Live 12: the track's take lanes, each with its own Arrangement clips." },
         { "name": "devices", "type": "Device list", "description": "The track's device chain." },
         { "name": "mixer_device", "type": "MixerDevice", "description": "Volume, pan, sends and crossfader assignment." },
         { "name": "view", "type": "Track.View", "description": "The track's view state." }
@@ -157,8 +158,26 @@
       "methods": [
         { "name": "stop_all_clips()", "description": "Stop this track's playing Session clip." },
         { "name": "duplicate_clip_to_arrangement(clip, time)", "type": "Clip", "description": "Copy a clip onto this track's Arrangement timeline at a beat position." },
+        { "name": "create_midi_clip(start_time, length)", "type": "Clip", "description": "Live 12: create an empty MIDI clip on the Arrangement timeline. MIDI tracks only." },
+        { "name": "create_audio_clip(file_path, position)", "type": "Clip", "description": "Live 12: import an audio file onto the Arrangement timeline at a beat position. Audio tracks only." },
+        { "name": "create_take_lane()", "type": "TakeLane", "description": "Live 12: add a take lane to the track." },
         { "name": "delete_clip(clip)", "description": "Delete one of this track's Arrangement clips." },
         { "name": "delete_device(index)", "description": "Remove a device from the chain." }
+      ]
+    },
+    {
+      "name": "TakeLane",
+      "path": "live_set tracks N take_lanes M",
+      "description": "Live 12: one take lane of a track, used for comping. Its clips sit on the Arrangement timeline alongside the track's main lane.",
+      "properties": [
+        { "name": "name", "type": "string", "access": "read/write", "description": "Lane name." }
+      ],
+      "children": [
+        { "name": "arrangement_clips", "type": "Clip list", "description": "The lane's clips, ordered by start time." }
+      ],
+      "methods": [
+        { "name": "create_midi_clip(start_time, length)", "type": "Clip", "description": "Create an empty MIDI clip on this lane. MIDI tracks only." },
+        { "name": "create_audio_clip(file_path, start_time)", "type": "Clip", "description": "Import an audio file onto this lane at a beat position. Audio tracks only." }
       ]
     },
     {
@@ -276,7 +295,7 @@
         { "name": "duplicate_region(start, length, destination_time)", "description": "Copy a region of the clip to another position within it." },
         { "name": "fire()", "description": "Launch the clip." },
         { "name": "stop()", "description": "Stop the clip." },
-        { "name": "automation_envelope(parameter)", "type": "DeviceParameter envelope", "description": "The clip's automation for a parameter, creating it on demand. Pass None to clear it." },
+        { "name": "automation_envelope(parameter)", "type": "DeviceParameter envelope", "description": "The clip's automation envelope for a parameter, or None when the clip has none. It does not create one: that is create_automation_envelope, on Session clips only." },
         { "name": "clear_envelope(parameter)", "description": "Remove the clip's automation for a parameter." },
         { "name": "clear_all_envelopes()", "description": "Remove every automation envelope in the clip." },
         { "name": "get_warp_markers()", "type": "WarpMarker list", "description": "Audio clips: the warp markers." },

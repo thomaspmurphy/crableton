@@ -36,7 +36,7 @@ except ImportError:
 DEFAULT_PORT = 9878
 HOST = "127.0.0.1"
 
-SCRIPT_VERSION = "2.1.0"
+SCRIPT_VERSION = "2.2.0"
 PROTOCOL_VERSION = 2
 
 # Sentinel returned by handlers that will answer on a later tick.
@@ -75,6 +75,13 @@ FOLLOW_ACTION = [
 ]
 
 MONITORING_STATE = ["in", "auto", "off"]
+
+# Launch settings: Arrangement clips carry them but never use them.
+SESSION_ONLY_CLIP_FIELDS = (
+    "launch_mode", "launch_quantization", "legato", "velocity_amount",
+    "follow_action_enabled", "follow_action_time", "follow_action_a",
+    "follow_action_b", "follow_action_chance_a", "follow_action_chance_b",
+)
 CROSSFADE_ASSIGN = ["a", "none", "b"]
 
 DEVICE_TYPE = {0: "undefined", 1: "instrument", 2: "audio_effect", 4: "midi_effect"}
@@ -329,20 +336,16 @@ class AbletonMCP(ControlSurface):
 
     def _get_script_info(self):
         song = self._song_ref
-        clip_envelopes = False
+        # Ask the class, not a clip in the set: a set with no Session clips
+        # would otherwise report no envelope support at all.
         try:
-            # Feature-detect rather than assume: the envelope API is not
-            # uniformly present across Live versions and editions.
-            for track in song.tracks:
-                for slot in track.clip_slots:
-                    if slot.has_clip:
-                        clip_envelopes = hasattr(slot.clip, "automation_envelope")
-                        raise StopIteration
-        except StopIteration:
-            pass
-        except Exception:
-            pass
+            import Live
+            clip_envelopes = hasattr(Live.Clip.Clip, "automation_envelope")
+            envelope_events = hasattr(Live, "Envelope") and hasattr(Live.Envelope, "EnvelopeEvent")
+        except (ImportError, AttributeError):
+            clip_envelopes = envelope_events = False
 
+        first_track = song.tracks[0] if len(song.tracks) else None
         return {
             "name": "Crableton",
             "script_version": SCRIPT_VERSION,
@@ -353,7 +356,10 @@ class AbletonMCP(ControlSurface):
             "features": {
                 "batch": True,
                 "clip_envelopes": clip_envelopes,
+                "envelope_events": envelope_events,
                 "extended_notes": hasattr(song, "view"),
+                "arrangement_clip_creation": hasattr(first_track, "create_midi_clip"),
+                "take_lanes": hasattr(first_track, "take_lanes"),
             },
         }
 
@@ -453,8 +459,14 @@ class AbletonMCP(ControlSurface):
             # arrangement
             "get_arrangement_clips": self._get_arrangement_clips,
             "duplicate_clip_to_arrangement": self._duplicate_clip_to_arrangement,
+            "create_arrangement_clip": self._create_arrangement_clip,
+            "create_arrangement_audio_clip": self._create_arrangement_audio_clip,
             "delete_arrangement_clip": self._delete_arrangement_clip,
             "clear_arrangement": self._clear_arrangement,
+            "get_take_lanes": self._get_take_lanes,
+            "create_take_lane": self._create_take_lane,
+            "start_arrangement_recording": self._start_arrangement_recording,
+            "stop_arrangement_recording": self._stop_arrangement_recording,
             "get_locators": self._get_locators,
             "create_locator": self._create_locator,
             "delete_locator": self._delete_locator,
@@ -482,20 +494,51 @@ class AbletonMCP(ControlSurface):
         track = self._resolve_track(params)
         index = int(params.get("clip_index", 0))
         view = (params.get("view") or "session").lower()
+        lane_index = params.get("take_lane_index")
 
         if view == "arrangement":
-            clips = list(track.arrangement_clips)
+            if lane_index is None:
+                owner, where = track, "this track"
+            else:
+                owner = self._resolve_take_lane(track, int(lane_index))
+                where = "take lane %d" % int(lane_index)
+            clips = list(owner.arrangement_clips)
             if not 0 <= index < len(clips):
                 raise IndexError(
-                    "arrangement clip %d does not exist on this track (there are %d)"
-                    % (index, len(clips))
+                    "arrangement clip %d does not exist on %s (there are %d)"
+                    % (index, where, len(clips))
                 )
             return clips[index]
 
+        if lane_index is not None:
+            raise ValueError(
+                "take_lane_index only applies to Arrangement clips; pass view \"arrangement\""
+            )
         slot = self._resolve_slot(track, index)
         if not slot.has_clip:
             raise ValueError("clip slot %d is empty" % index)
         return slot.clip
+
+    @staticmethod
+    def _take_lanes(track):
+        if not hasattr(track, "take_lanes"):
+            raise RuntimeError(
+                "this Live version does not expose take lanes to scripts; "
+                "Track.take_lanes needs a recent Live 12 release"
+            )
+        try:
+            return list(track.take_lanes)
+        except RuntimeError as e:
+            raise ValueError("%r has no take lanes: %s" % (track.name, e))
+
+    def _resolve_take_lane(self, track, index):
+        lanes = self._take_lanes(track)
+        if not 0 <= index < len(lanes):
+            raise IndexError(
+                "take lane %d does not exist on %r (there are %d)"
+                % (index, track.name, len(lanes))
+            )
+        return lanes[index]
 
     @staticmethod
     def _resolve_slot(track, index):
@@ -1376,6 +1419,12 @@ class AbletonMCP(ControlSurface):
         return {"deleted": name, "clip_index": index}
 
     def _duplicate_clip(self, params, respond):
+        if (params.get("view") or "session").lower() != "session" \
+                or params.get("take_lane_index") is not None:
+            raise ValueError(
+                "duplicate_clip copies Session clips only; to place a clip in the "
+                "Arrangement use duplicate_clip_to_arrangement"
+            )
         source_track = self._resolve_track(params)
         source = self._resolve_slot(source_track, int(params["clip_index"]))
         if not source.has_clip:
@@ -1417,6 +1466,15 @@ class AbletonMCP(ControlSurface):
         for key in audio_only:
             if params.get(key) is not None and not is_audio:
                 raise ValueError("%s applies to audio clips only; this is a MIDI clip" % key)
+        if self._get(clip, "is_arrangement_clip", False):
+            launch_only = [k for k in SESSION_ONLY_CLIP_FIELDS if params.get(k) is not None]
+            if launch_only:
+                raise ValueError(
+                    "%s only %s Session clips, which are launched; %r is an "
+                    "Arrangement clip"
+                    % (", ".join(launch_only),
+                       "affects" if len(launch_only) == 1 else "affect", clip.name)
+                )
 
         # Loop bounds before markers: Live clamps each against the other, and
         # writing them in the wrong order can silently reject a valid range.
@@ -1495,8 +1553,8 @@ class AbletonMCP(ControlSurface):
 
         envelope = clip.automation_envelope(parameter)
         if envelope is None:
-            # An Arrangement clip duplicated from an automated Session clip
-            # keeps its envelopes, but `automation_envelope(parameter)` will not
+            # An Arrangement copy of an automated Session clip keeps its
+            # envelopes only when the track has no devices (Live 12.4.6), but `automation_envelope(parameter)` will not
             # resolve them, the parameter object belongs to the track, not the
             # placed copy. They are still reachable by walking the clip's own
             # envelope collection.
@@ -1523,8 +1581,8 @@ class AbletonMCP(ControlSurface):
             raise RuntimeError(
                 "Live will not create a new automation envelope on an Arrangement clip, "
                 "and %r has none for %r yet. Write the envelope on the Session clip "
-                "first and then use duplicate_clip_to_arrangement, the placed copies "
-                "keep it, and can be rewritten in place afterwards."
+                "first and then use duplicate_clip_to_arrangement. The copies keep it "
+                "only on a track with no devices, and can then be rewritten in place."
                 % (clip.name, parameter.name)
             )
 
@@ -1573,8 +1631,13 @@ class AbletonMCP(ControlSurface):
         # Prefer the real breakpoints: sampling is lossy and cannot round-trip.
         events = self._envelope_events(envelope, length)
         if events is not None:
+            points, space = events
             result["read_as"] = "breakpoints"
-            result["points"] = events
+            result["points"] = points
+            if space != "parameter":
+                result["values"] = space
+                result["note"] = ("Live would not report values in the parameter's units, so "
+                                  "these are its internal envelope values (for volume, linear gain)")
             return result
 
         # Older scripts / envelope types expose no event list, so fall back to
@@ -1599,7 +1662,13 @@ class AbletonMCP(ControlSurface):
         return result
 
     def _envelope_events(self, envelope, length):
-        """The envelope's actual breakpoints, or None if Live will not list them."""
+        """(breakpoints, value space) for the envelope, or None if Live will not list them.
+
+        An event's `value` is Live's internal envelope value, which for volume
+        is linear gain rather than the parameter value set_clip_envelope
+        writes, so only the times come from the events and each value is read
+        back through value_at_time in parameter space.
+        """
         reader = getattr(envelope, "events_in_range", None)
         if reader is None:
             return None
@@ -1609,69 +1678,76 @@ class AbletonMCP(ControlSurface):
             self.log_message("events_in_range failed: %s" % e)
             return None
 
-        points = []
+        raw = []
         for event in events or ():
             time_value = self._get(event, "time")
             value = self._get(event, "value")
             if time_value is None or value is None:
                 continue
-            points.append([round(float(time_value), 6), float(value)])
-        return points
+            raw.append((float(time_value), float(value)))
+
+        try:
+            points = [[round(t, 6), round(self._parameter_value_at(envelope, t, length), 6)]
+                      for t, _ in raw]
+            return points, "parameter"
+        except Exception as e:
+            self.log_message("value_at_time failed: %s" % e)
+            return [[round(t, 6), v] for t, v in raw], "internal"
+
+    @staticmethod
+    def _parameter_value_at(envelope, time_value, length, nudge=1e-4):
+        """The envelope's value at a breakpoint, in the parameter's units.
+
+        At the clip origin value_at_time reports the parameter's static value,
+        and at the clip end it can read past the envelope, so those points are
+        read twice just inside and extrapolated back, which is exact on the
+        straight segments Live draws between breakpoints.
+        """
+        if time_value < nudge:
+            near = envelope.value_at_time(time_value + nudge)
+            far = envelope.value_at_time(time_value + 2 * nudge)
+        elif time_value > length - nudge:
+            near = envelope.value_at_time(time_value - nudge)
+            far = envelope.value_at_time(time_value - 2 * nudge)
+        else:
+            return float(envelope.value_at_time(time_value))
+        return float(2 * near - far)
 
     def _set_clip_envelope(self, params, respond):
-        clip, parameter, envelope = self._envelope_for(params, create=True)
-
+        # Validate before creating anything, so bad input leaves no envelope.
+        clip, parameter, envelope = self._envelope_for(params)
         points = self._validated_points(params.get("points") or [], parameter)
+        clamped = sum(1 for point in params["points"]
+                      if not parameter.min <= float(point[1]) <= parameter.max)
         interpolation = (params.get("interpolation") or "linear").lower()
         resolution = float(params.get("resolution", 0.0625))
         if resolution <= 0:
             raise ValueError("resolution must be greater than 0")
 
+        created = envelope is None
+        if created:
+            clip, parameter, envelope = self._envelope_for(params, create=True)
+
         clip_length = float(self._get(clip, "length", 0.0) or 0.0)
         span = max(clip_length, points[-1][0])
 
-        # Clear the old shape *without* dropping the envelope itself.
-        # `clip.clear_envelope` destroys it, and Live will not recreate one on
-        # an Arrangement clip, so that route is a one-way door there.
-        cleared = False
-        if hasattr(envelope, "delete_events_in_range"):
-            try:
-                envelope.delete_events_in_range(0.0, span + 1.0)
-                cleared = True
-            except Exception as e:
-                self.log_message("delete_events_in_range failed: %s" % e)
-        if not cleared:
-            if self._get(clip, "is_arrangement_clip", False):
-                raise RuntimeError(
-                    "cannot replace this Arrangement clip's envelope: Live offers no way "
-                    "to clear it in place, and clearing it outright cannot be undone"
-                )
-            try:
-                clip.clear_envelope(parameter)
-            except Exception as e:
-                self.log_message("clear_envelope(%s): %s" % (parameter.name, e))
-            _, _, envelope = self._envelope_for(params, create=True)
-
-        # Breakpoints are what Live's own automation lane holds, and it ramps
-        # between them natively, so a smooth curve is a handful of events, not
-        # hundreds of stepped approximations. Steps are only for a deliberate
-        # staircase, or where `create_event` is unavailable.
-        use_events = interpolation != "step" and hasattr(envelope, "create_event")
-        if use_events:
-            written = self._write_breakpoints(envelope, points, span)
-            method = "breakpoints"
-        elif hasattr(envelope, "insert_step"):
-            written = 0
-            for start, length, value in self._envelope_steps(
-                    points, interpolation, resolution, clip_length):
-                envelope.insert_step(start, length, value)
-                written += 1
-            method = "steps"
-        else:
-            raise RuntimeError(
-                "this envelope cannot be written to; it offers: %s"
-                % ", ".join(n for n in dir(envelope) if not n.startswith("_"))
-            )
+        try:
+            # Clear the old shape *without* dropping the envelope itself.
+            # `clip.clear_envelope` destroys it, and Live will not recreate one
+            # on an Arrangement clip, so that route is a one-way door there.
+            if not created:
+                envelope = self._empty_envelope(clip, parameter, envelope, span, params)
+            written, method, how = self._write_points(
+                envelope, points, interpolation, resolution, clip_length, span)
+        except Exception:
+            if created:
+                # Do not leave the empty envelope behind: it reads back as
+                # automation that is there but holds nothing.
+                try:
+                    clip.clear_envelope(parameter)
+                except Exception as e:
+                    self.log_message("clear_envelope after a failed write: %s" % e)
+            raise
 
         result = {
             "parameter": parameter.name,
@@ -1680,23 +1756,98 @@ class AbletonMCP(ControlSurface):
             "interpolation": interpolation,
             "range": [parameter.min, parameter.max],
         }
+        if how:
+            result["via"] = how
+        if clamped:
+            result["clamped"] = clamped
+            result["clamp_note"] = ("%d value(s) fell outside %s to %s and were clamped to it"
+                                    % (clamped, parameter.min, parameter.max))
         if method == "steps":
             result["resolution"] = resolution
+            if interpolation != "step":
+                result["note"] = ("Live would not take breakpoints, so the ramps are a "
+                                  "stepped approximation every %s beats" % resolution)
         return result
 
+    def _empty_envelope(self, clip, parameter, envelope, span, params):
+        """Remove an envelope's events, returning the envelope to write into."""
+        if hasattr(envelope, "delete_events_in_range"):
+            try:
+                envelope.delete_events_in_range(0.0, span + 1.0)
+                return envelope
+            except Exception as e:
+                self.log_message("delete_events_in_range failed: %s" % e)
+        if self._get(clip, "is_arrangement_clip", False):
+            raise RuntimeError(
+                "cannot replace this Arrangement clip's envelope: Live offers no way "
+                "to clear it in place, and clearing it outright cannot be undone"
+            )
+        clip.clear_envelope(parameter)
+        return self._envelope_for(params, create=True)[2]
+
+    def _write_points(self, envelope, points, interpolation, resolution, clip_length, span):
+        """Write the shape, as breakpoints where Live accepts them, else as steps.
+
+        Returns (events written, "breakpoints" or "steps", the call used).
+        """
+        # Breakpoints are what Live's own automation lane holds, and it ramps
+        # between them natively, so a smooth curve is a handful of events, not
+        # hundreds of stepped approximations.
+        if interpolation != "step" and hasattr(envelope, "create_event"):
+            for name, make in self._event_writers(envelope):
+                try:
+                    return self._write_breakpoints(make, points, span), "breakpoints", name
+                except Exception as e:
+                    self.log_message("create_event via %s failed: %s" % (name, e))
+                    # Drop anything a writer managed before failing.
+                    if hasattr(envelope, "delete_events_in_range"):
+                        envelope.delete_events_in_range(0.0, span + 1.0)
+
+        if hasattr(envelope, "insert_step"):
+            written = 0
+            for start, length, value in self._envelope_steps(
+                    points, interpolation, resolution, clip_length):
+                envelope.insert_step(start, length, value)
+                written += 1
+            return written, "steps", "insert_step"
+
+        raise RuntimeError(
+            "this envelope cannot be written to; it offers: %s"
+            % ", ".join(n for n in dir(envelope) if not n.startswith("_"))
+        )
+
     @staticmethod
-    def _write_breakpoints(envelope, points, span):
+    def _event_writers(envelope):
+        """The ways of calling create_event, newest first.
+
+        Live 12 takes one Live.Envelope.EnvelopeEvent(time, value); passing
+        time and value separately raises a Boost signature mismatch there.
+        """
+        writers = []
+        try:
+            from Live.Envelope import EnvelopeEvent
+        except ImportError:
+            EnvelopeEvent = None
+        if EnvelopeEvent is not None:
+            writers.append(("EnvelopeEvent",
+                            lambda t, v: envelope.create_event(EnvelopeEvent(t, v))))
+        writers.append(("create_event(time, value)",
+                        lambda t, v: envelope.create_event(t, v)))
+        return writers
+
+    @staticmethod
+    def _write_breakpoints(create, points, span):
         """Write points as automation events, letting Live ramp between them."""
         written = 0
         for time_value, value in points:
-            envelope.create_event(time_value, value)
+            create(float(time_value), float(value))
             written += 1
 
         # Hold the last value to the end of the clip; without a closing event
         # Live ramps on from the final breakpoint to whatever follows.
         last_time, last_value = points[-1]
         if span > last_time:
-            envelope.create_event(span, last_value)
+            create(float(span), float(last_value))
             written += 1
         return written
 
@@ -1753,10 +1904,26 @@ class AbletonMCP(ControlSurface):
         return steps
 
     def _clear_clip_envelope(self, params, respond):
-        clip = self._resolve_clip(params)
-        _, parameter = self._resolve_parameter(params)
+        clip, parameter, envelope = self._envelope_for(params)
+        if envelope is None:
+            return {"cleared": False, "parameter": parameter.name,
+                    "note": "the clip has no automation for this parameter"}
         clip.clear_envelope(parameter)
-        return {"cleared": parameter.name}
+        result = {"cleared": True, "parameter": parameter.name}
+        if self._get(clip, "is_arrangement_clip", False):
+            # A placed copy's envelope may belong to a parameter object other
+            # than the track's (see _envelope_for), so clearing by the track's
+            # parameter can miss it; clear by the envelope's own owner too.
+            if self._envelope_from_collection(clip, parameter) is not None:
+                owner = self._get(envelope, "parameter")
+                if owner is not None and owner is not parameter:
+                    clip.clear_envelope(owner)
+            if self._envelope_from_collection(clip, parameter) is not None:
+                raise RuntimeError("Live did not remove %r's automation from %r"
+                                   % (parameter.name, clip.name))
+            result["note"] = ("Live will not create automation on an Arrangement clip, "
+                              "so this envelope cannot be written again in place")
+        return result
 
     # ── Notes ────────────────────────────────────────────────────────────────
 
@@ -2607,13 +2774,16 @@ class AbletonMCP(ControlSurface):
     # ── Arrangement ──────────────────────────────────────────────────────────
 
     def _get_arrangement_clips(self, params, respond):
-        track = self._resolve_track(params)
-        clips = list(track.arrangement_clips)
-        return {
+        track, owner, lane = self._arrangement_owner(params)
+        clips = list(owner.arrangement_clips)
+        result = {
             "track": track.name,
             "count": len(clips),
             "clips": [self._serialize_clip(c, i, brief=True) for i, c in enumerate(clips)],
         }
+        if lane is not None:
+            result["take_lane_index"] = lane
+        return result
 
     def _duplicate_clip_to_arrangement(self, params, respond):
         track = self._resolve_track(params)
@@ -2628,32 +2798,428 @@ class AbletonMCP(ControlSurface):
             raise ValueError("the source clip has no length")
 
         start = float(params["destination_time"])
+        through = start + repeats * length
+        self._check_arrangement_gap(track, start, through, track.name)
+        automated = self._clip_automated_parameters(track, source)
+
         placed = []
         for n in range(repeats):
             at = start + n * length
             track.duplicate_clip_to_arrangement(source, at)
             placed.append(at)
 
-        return {
+        clips = list(track.arrangement_clips)
+        copies = []
+        for at in placed:
+            index = next((i for i, c in enumerate(clips)
+                          if abs(float(self._get(c, "start_time", -1.0)) - at) < 1e-6), None)
+            copies.append({"clip_index": index, "start_time": at})
+
+        envelopes = []
+        for device, parameter in automated:
+            missing = [c["clip_index"] for c in copies
+                       if c["clip_index"] is None
+                       or not self._clip_has_envelope(clips[c["clip_index"]], parameter)]
+            envelopes.append({"device": device, "parameter": parameter.name,
+                              "carried": not missing, "missing_on": missing})
+        result = {
             "clip": source.name,
             "track": track.name,
             "placed_at": placed,
-            "through": start + repeats * length,
+            "through": through,
+            "copies": copies,
+            "envelopes": envelopes,
         }
+        lost = ["%s %s" % (e["device"], e["parameter"]) for e in envelopes if not e["carried"]]
+        if lost:
+            result["note"] = ("Live did not carry these envelopes onto every copy: %s. "
+                              "Live strips clip envelopes from Arrangement copies "
+                              "when the track holds any device."
+                              % ", ".join(lost))
+        return result
+
+    def _clip_has_envelope(self, clip, parameter):
+        try:
+            if clip.automation_envelope(parameter) is not None:
+                return True
+        except Exception:
+            pass
+        return self._envelope_from_collection(clip, parameter) is not None
+
+    def _clip_automated_parameters(self, track, clip):
+        """(device name, parameter) for each mixer or top-level device
+        parameter the clip has an envelope for."""
+        mixer = track.mixer_device
+        candidates = [("Mixer", p) for p in
+                      [mixer.volume, mixer.panning] + list(getattr(mixer, "sends", []))]
+        for device in getattr(track, "devices", []):
+            candidates.extend((device.name, p) for p in device.parameters)
+
+        automated = []
+        for device, parameter in candidates:
+            try:
+                if clip.automation_envelope(parameter) is not None:
+                    automated.append((device, parameter))
+            except Exception:
+                continue
+        return automated
+
+    def _arrangement_owner(self, params):
+        """(track, what holds its Arrangement clips, take lane index or None).
+
+        A take lane keeps its own clip list, so "the clips" and "where a new
+        clip goes" are either the track's main lane or one of its take lanes.
+        """
+        track = self._resolve_track(params)
+        lane = params.get("take_lane_index")
+        if lane is None:
+            return track, track, None
+        return track, self._resolve_take_lane(track, int(lane)), int(lane)
+
+    def _check_arrangement_gap(self, owner, start, end, where):
+        for clip in owner.arrangement_clips:
+            clip_start = float(self._get(clip, "start_time", 0.0) or 0.0)
+            clip_end = float(self._get(clip, "end_time", clip_start) or clip_start)
+            if clip_start < end - 1e-9 and clip_end > start + 1e-9:
+                raise ValueError(
+                    "%r already occupies beats %s to %s on %s; delete it first with "
+                    "delete_arrangement_clip or clear_arrangement if you mean to replace it"
+                    % (clip.name, clip_start, clip_end, where)
+                )
+
+    def _placed_clip(self, track, owner, lane, created, start):
+        """Report a clip just placed in the Arrangement, with its clip_index."""
+        clips = list(owner.arrangement_clips)
+        index = None
+        if created is not None:
+            index = next((i for i, c in enumerate(clips) if c == created), None)
+        if index is None:
+            index = next((i for i, c in enumerate(clips)
+                          if abs(float(self._get(c, "start_time", -1.0)) - start) < 1e-6), None)
+        if index is None:
+            raise RuntimeError("Live did not place a clip at beat %s" % start)
+        result = {
+            "track": track.name,
+            "view": "arrangement",
+            "clip_index": index,
+            "clip": self._serialize_clip(clips[index], index, brief=True),
+        }
+        if lane is not None:
+            result["take_lane_index"] = lane
+        return result
+
+    @staticmethod
+    def _beats(params, name, minimum=0.0, strict=False):
+        value = float(params[name])
+        if value < minimum or (strict and value == minimum):
+            raise ValueError("%s must be %s %s, got %s"
+                             % (name, "greater than" if strict else "at least", minimum, value))
+        return value
+
+    def _create_arrangement_clip(self, params, respond):
+        track, owner, lane = self._arrangement_owner(params)
+        if not self._get(track, "has_midi_input", False):
+            raise ValueError("%r is not a MIDI track, so it cannot hold a MIDI clip" % track.name)
+        if not hasattr(owner, "create_midi_clip"):
+            raise RuntimeError(
+                "this Live version cannot create Arrangement clips through the API; "
+                "create_midi_clip needs a recent Live 12 release. Create a Session clip "
+                "and use duplicate_clip_to_arrangement instead"
+            )
+        start = self._beats(params, "start_time")
+        if params.get("length") is None:
+            params = dict(params, length=4.0)
+        length = self._beats(params, "length", strict=True)
+        where = track.name if lane is None else "take lane %d of %r" % (lane, track.name)
+        self._check_arrangement_gap(owner, start, start + length, where)
+        created = owner.create_midi_clip(start, length)
+        return self._placed_clip(track, owner, lane, created, start)
+
+    def _create_arrangement_audio_clip(self, params, respond):
+        track, owner, lane = self._arrangement_owner(params)
+        if not self._get(track, "has_audio_input", False):
+            raise ValueError("%r is not an audio track" % track.name)
+        if not hasattr(owner, "create_audio_clip"):
+            raise RuntimeError(
+                "this Live version cannot import audio into the Arrangement through the "
+                "API; create_audio_clip on a track needs a recent Live 12 release"
+            )
+        start = self._beats(params, "start_time")
+        where = track.name if lane is None else "take lane %d of %r" % (lane, track.name)
+        # The file's length is unknown until Live has read it, so only the
+        # start can be checked for a collision.
+        self._check_arrangement_gap(owner, start, start + 1e-6, where)
+        created = owner.create_audio_clip(str(params["path"]), start)
+        return self._placed_clip(track, owner, lane, created, start)
 
     def _delete_arrangement_clip(self, params, respond):
-        track = self._resolve_track(params)
-        clips = list(track.arrangement_clips)
-        index = int(params["clip_index"])
-        if not 0 <= index < len(clips):
-            raise IndexError(
-                "arrangement clip %d does not exist on %r (there are %d)"
-                % (index, track.name, len(clips))
-            )
-        clip = clips[index]
+        track, owner, lane = self._arrangement_owner(params)
+        clip = self._resolve_clip(dict(params, view="arrangement"))
         name, start = clip.name, self._get(clip, "start_time")
-        track.delete_clip(clip)
-        return {"deleted": name, "was_at": start, "remaining": len(track.arrangement_clips)}
+        remaining = self._delete_placed_clip(track, owner, clip)
+        result = {"deleted": name, "was_at": start, "remaining": remaining}
+        if lane is not None:
+            result["take_lane_index"] = lane
+        return result
+
+    def _delete_placed_clip(self, track, owner, clip):
+        """Delete an Arrangement clip and confirm it is gone; returns what is left.
+
+        Track.delete_clip silently ignores a take lane's clip, so a call that
+        does not raise proves nothing. Ableton's own scripts delete through
+        the clip's canonical_parent; try that, then the lane, then the track,
+        checking the clip count after each.
+        """
+        before = len(owner.arrangement_clips)
+        main_before = len(track.arrangement_clips)
+        on_lane = owner is not track
+        candidates = [("the clip's canonical_parent", self._get(clip, "canonical_parent"))]
+        if on_lane:
+            candidates.append(("the take lane", owner))
+        candidates.append(("the track", track))
+        tried = []
+        for role, holder in candidates:
+            if holder is None:
+                tried.append("%s is not available" % role)
+                continue
+            label = "%s (%s)" % (role, type(holder).__name__)
+            deleter = getattr(holder, "delete_clip", None)
+            if deleter is None:
+                tried.append("%s has no delete_clip" % label)
+                continue
+            try:
+                deleter(clip)
+            except Exception as e:
+                tried.append("%s.delete_clip raised %s" % (label, e))
+                continue
+            after = len(owner.arrangement_clips)
+            if after == before - 1:
+                return after
+            tried.append("%s.delete_clip left it in place" % label)
+            if on_lane and len(track.arrangement_clips) != main_before:
+                raise RuntimeError("deleting a take lane clip removed a main lane clip "
+                                   "instead; undo restores it")
+        if on_lane:
+            raise RuntimeError(
+                "Live's API offers no way to delete a take lane clip (as of Live 12.4): %s. "
+                "Delete it in Live itself, or leave it: a take lane clip only plays once "
+                "it is comped into the main lane." % "; ".join(tried))
+        raise RuntimeError("Live did not delete the clip: %s" % "; ".join(tried))
+
+    # ── Take lanes ───────────────────────────────────────────────────────────
+
+    def _serialize_take_lane(self, lane, index):
+        try:
+            clips = list(lane.arrangement_clips)
+        except (AttributeError, RuntimeError):
+            clips = []
+        return {
+            "index": index,
+            "name": self._get(lane, "name"),
+            "clip_count": len(clips),
+            "clips": [self._serialize_clip(c, i, brief=True) for i, c in enumerate(clips)],
+        }
+
+    def _get_take_lanes(self, params, respond):
+        track = self._resolve_track(params)
+        lanes = self._take_lanes(track)
+        return {
+            "track": track.name,
+            "count": len(lanes),
+            "take_lanes": [self._serialize_take_lane(l, i) for i, l in enumerate(lanes)],
+        }
+
+    def _create_take_lane(self, params, respond):
+        track = self._resolve_track(params)
+        self._take_lanes(track)
+        if not hasattr(track, "create_take_lane"):
+            raise RuntimeError(
+                "this Live version cannot add take lanes through the API; "
+                "Track.create_take_lane needs a recent Live 12 release"
+            )
+        created = track.create_take_lane()
+        lanes = list(track.take_lanes)
+        index = None
+        if created is not None:
+            index = next((i for i, l in enumerate(lanes) if l == created), None)
+        if index is None:
+            index = len(lanes) - 1
+        lane = lanes[index]
+        if params.get("name"):
+            self._apply(lane, "name", str(params["name"]))
+        result = {"track": track.name, "count": len(lanes)}
+        result.update(self._serialize_take_lane(lane, index))
+        return result
+
+    # ── Arrangement recording ────────────────────────────────────────────────
+
+    def _armed_tracks(self, indices=None):
+        tracks = self._song_ref.tracks
+        if indices is None:
+            indices = [i for i, t in enumerate(tracks)
+                       if self._get(t, "can_be_armed", False) and self._get(t, "arm", False)]
+        return [
+            {"track_index": i, "name": tracks[i].name,
+             "arrangement_clip_count": len(tracks[i].arrangement_clips)}
+            for i in indices
+        ]
+
+    def _recording_state(self, track_indices=None):
+        song = self._song_ref
+        state = {
+            "recording": bool(self._get(song, "record_mode", False)),
+            "is_playing": bool(song.is_playing),
+            "current_song_time": song.current_song_time,
+            "overdub": self._get(song, "arrangement_overdub"),
+            "armed_tracks": self._armed_tracks(track_indices),
+        }
+        if self._get(song, "is_counting_in", False):
+            state["counting_in"] = True
+        return state
+
+    def _when_settled(self, respond, settled, report):
+        """Answer with report() once settled() holds, one tick later still.
+
+        Live applies transport and record changes on a later tick, and a take
+        becomes a clip only after recording stops, so reading back straight
+        away reports the state from before the request.
+        """
+        ticks = {"count": 0, "settled": False}
+
+        def check():
+            ticks["count"] += 1
+            try:
+                if not ticks["settled"]:
+                    if settled():
+                        ticks["settled"] = True
+                    elif ticks["count"] <= MAX_DEFER_TICKS:
+                        self._defer(1, check)
+                        return
+                    else:
+                        result = report()
+                        result["warning"] = ("Live had not applied the change after %d "
+                                             "ticks; this is its state now" % ticks["count"])
+                        respond({"ok": result})
+                        return
+                    self._defer(1, check)
+                    return
+                respond({"ok": report()})
+            except Exception as e:
+                respond({"error": str(e)})
+
+        self._defer(1, check)
+        return DEFERRED
+
+    def _start_arrangement_recording(self, params, respond):
+        song = self._song_ref
+
+        # Resolve everything before changing anything, so a bad index leaves
+        # the set as it was.
+        to_arm = []
+        for index in params.get("arm_tracks") or []:
+            track = self._resolve_track({"track_index": index})
+            if not self._get(track, "can_be_armed", False):
+                raise ValueError("%r cannot be record-armed" % track.name)
+            to_arm.append(track)
+        from_time = params.get("from_time")
+        if from_time is not None:
+            from_time = float(from_time)
+            if from_time < 0:
+                raise ValueError("from_time must not be negative")
+            if respond is None:
+                raise RuntimeError(
+                    "start_arrangement_recording with from_time needs more than one pass "
+                    "and cannot run inside a batch"
+                )
+
+        for track in to_arm:
+            track.arm = True
+        if params.get("overdub") is not None:
+            song.arrangement_overdub = bool(params["overdub"])
+
+        def begin():
+            song.record_mode = True
+            if not song.is_playing:
+                song.start_playing()
+
+        def report():
+            state = self._recording_state()
+            if not state["armed_tracks"]:
+                state["warning"] = ("no track is armed, so no clips will be recorded; "
+                                    "pass arm_tracks")
+            return state
+
+        def settled():
+            return bool(self._get(song, "record_mode", False)) and (
+                song.is_playing or self._get(song, "is_counting_in", False))
+
+        if from_time is None:
+            begin()
+            if respond is None:
+                return self._as_requested(report(), recording=True, is_playing=True)
+            return self._when_settled(respond, settled, report)
+
+        song.current_song_time = from_time
+        ticks = {"count": 0}
+
+        def when_positioned():
+            ticks["count"] += 1
+            if abs(song.current_song_time - from_time) > 1e-3:
+                if ticks["count"] > MAX_DEFER_TICKS:
+                    respond({"error": "Live would not move the playhead to beat %s" % from_time})
+                    return
+                self._defer(1, when_positioned)
+                return
+            try:
+                begin()
+                self._when_settled(respond, settled, report)
+            except Exception as e:
+                respond({"error": str(e)})
+
+        self._defer(1, when_positioned)
+        return DEFERRED
+
+    @staticmethod
+    def _as_requested(state, **requested):
+        """Inside a batch there is no later tick to read back on."""
+        state.update(requested)
+        state["reported"] = ("as requested: inside a batch Live has not applied the "
+                             "change yet")
+        return state
+
+    def _stop_arrangement_recording(self, params, respond):
+        song = self._song_ref
+        was_recording = bool(self._get(song, "record_mode", False))
+        stop_playback = params.get("stop_playback", True) is not False
+        # Report the tracks that were recording, even once disarmed.
+        recorded = [entry["track_index"] for entry in self._armed_tracks()]
+        song.record_mode = False
+        if stop_playback and song.is_playing:
+            song.stop_playing()
+        disarmed = None
+        if params.get("disarm"):
+            disarmed = []
+            for index in recorded:
+                song.tracks[index].arm = False
+                disarmed.append(song.tracks[index].name)
+
+        def report():
+            state = self._recording_state(recorded)
+            state["was_recording"] = was_recording
+            if disarmed is not None:
+                state["disarmed"] = disarmed
+            return state
+
+        def settled():
+            return not self._get(song, "record_mode", False) and (
+                not stop_playback or not song.is_playing)
+
+        if respond is None:
+            requested = {"recording": False}
+            if stop_playback:
+                requested["is_playing"] = False
+            return self._as_requested(report(), **requested)
+        return self._when_settled(respond, settled, report)
 
     def _clear_arrangement(self, params, respond):
         song = self._song_ref

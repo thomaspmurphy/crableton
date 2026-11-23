@@ -132,7 +132,9 @@ Two things to know:
 - **Automation belongs to a clip, and only a Session clip.** Live refuses to
   create an envelope on an Arrangement clip, answering "Not a session clip".
   So sequence it: write the envelope on the Session clip first, then
-  `duplicate_clip_to_arrangement`, and every copy carries the automation. A
+  `duplicate_clip_to_arrangement`. The copies keep the automation only on a
+  track with no devices; with any instrument or effect on the track, Live
+  strips it, and the result's `envelopes` list shows `carried: false`. A
   clip already sitting in the Arrangement cannot have automation created on it
   through the API; that needs the mouse. Say so plainly rather than implying
   it was written.

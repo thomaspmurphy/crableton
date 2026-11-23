@@ -2,7 +2,7 @@
 
 An MCP server for Ableton Live, written in Rust. Lets an LLM read and edit a
 running Live set: tracks, clips, MIDI notes, devices, arrangement, automation.
-89 tools.
+95 tools.
 
 Live only loads Python control surfaces, so there are two halves:
 
@@ -46,7 +46,7 @@ schemas. By group:
 | `note` | Read, add, replace, clear, transpose, duplicate, edit or delete by note id, with per-note probability |
 | `device` | Parameters, rack chains, macros, drum pads |
 | `browser` | Search by name, walk the tree, load devices and kits |
-| `arrangement` | Place clips, delete clips, locators |
+| `arrangement` | Create and place clips, delete clips, take lanes, recording, locators |
 | `analysis` | Harmony, arrangement structure, mix registers |
 | `meta` | Handshake, batch, Live API reference, device reference |
 
@@ -60,8 +60,10 @@ assembling itself step by step.
 targeting a device parameter or the track mixer. Two Live constraints it
 reports rather than hides: automation belongs to a clip, not a track, and Live
 will only create an envelope on a Session clip. The working order is to write
-the envelope on the Session clip, then `duplicate_clip_to_arrangement`; the
-placed copies carry it.
+the envelope on the Session clip, then `duplicate_clip_to_arrangement`. The
+copies keep the envelope only on a track with no devices: Live 12.4.6 strips
+clip envelopes from the copy as soon as the track holds any instrument or
+effect. The copy's result reports which envelopes survived.
 
 **Analysis.** `analyze_harmony`, `analyze_arrangement` and `analyze_mix`
 compute from one session snapshot, server-side, so the large payload does not
@@ -92,7 +94,7 @@ parameters matter on Live's stock devices and what they do.
 | `CRABLETON_TOOLSETS` | all | Comma-separated groups to expose |
 | `RUST_LOG` | `crableton=info` | Logging, on stderr |
 
-`CRABLETON_TOOLSETS` trims the tool list when 89 definitions is more context
+`CRABLETON_TOOLSETS` trims the tool list when 95 definitions is more context
 than a task needs, for example `CRABLETON_TOOLSETS=song,clip,note` for MIDI
 work. The `meta` group is always included.
 
@@ -145,7 +147,7 @@ Known gaps:
 - Live has no API to move an Arrangement clip. Deleting and re-placing it is
   the only route.
 - Automation cannot be created on an Arrangement clip at all, only carried
-  there from a Session clip.
+  there from a Session clip, and only on a track with no devices.
 - `analyze_mix` register ranges are MIDI note fundamentals, not measured
   spectra. Saturation and unison move where a part actually sits, so treat
   reported collisions as places to listen rather than faults.
