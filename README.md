@@ -2,7 +2,7 @@
 
 An MCP server for Ableton Live, written in Rust. Lets an LLM read and edit a
 running Live set: tracks, clips, MIDI notes, devices, arrangement, automation.
-85 tools.
+89 tools.
 
 Live only loads Python control surfaces, so there are two halves:
 
@@ -43,7 +43,7 @@ schemas. By group:
 | `scene` | Create, delete, duplicate, fire, per-scene tempo |
 | `track` | Create, delete, mixer, sends, routing, monitoring |
 | `clip` | Create, delete, duplicate, launch settings, warp, envelopes |
-| `note` | Read, add, replace, clear, with per-note probability |
+| `note` | Read, add, replace, clear, transpose, duplicate, edit or delete by note id, with per-note probability |
 | `device` | Parameters, rack chains, macros, drum pads |
 | `browser` | Search by name, walk the tree, load devices and kits |
 | `arrangement` | Place clips, delete clips, locators |
@@ -92,7 +92,7 @@ parameters matter on Live's stock devices and what they do.
 | `CRABLETON_TOOLSETS` | all | Comma-separated groups to expose |
 | `RUST_LOG` | `crableton=info` | Logging, on stderr |
 
-`CRABLETON_TOOLSETS` trims the tool list when 85 definitions is more context
+`CRABLETON_TOOLSETS` trims the tool list when 89 definitions is more context
 than a task needs, for example `CRABLETON_TOOLSETS=song,clip,note` for MIDI
 work. The `meta` group is always included.
 
@@ -134,8 +134,9 @@ Script. The cross-check tests fail if you add only one.
 ## Status and limitations
 
 Tested against Live 12.4.5. Most tools work on Live 11; a few are version-gated
-and say so when unavailable (`create_audio_clip` needs 12.0.5 or newer,
-per-note probability needs Live 11 or newer).
+and say so when unavailable (`create_audio_clip` needs 12.0.5 or newer;
+per-note probability, `modify_notes` and `remove_notes_by_id` need Live 11 or
+newer).
 
 Known gaps:
 

@@ -36,7 +36,7 @@ except ImportError:
 DEFAULT_PORT = 9878
 HOST = "127.0.0.1"
 
-SCRIPT_VERSION = "2.0.0"
+SCRIPT_VERSION = "2.1.0"
 PROTOCOL_VERSION = 2
 
 # Sentinel returned by handlers that will answer on a later tick.
@@ -431,6 +431,10 @@ class AbletonMCP(ControlSurface):
             "add_notes_to_clip": self._add_notes_to_clip,
             "replace_clip_notes": self._replace_clip_notes,
             "clear_notes_from_clip": self._clear_notes_from_clip,
+            "transpose_notes": self._transpose_notes,
+            "duplicate_notes": self._duplicate_notes,
+            "modify_notes": self._modify_notes,
+            "remove_notes_by_id": self._remove_notes_by_id,
             # devices
             "get_devices": self._get_devices,
             "get_device_parameters": self._get_device_parameters,
@@ -1771,25 +1775,29 @@ class AbletonMCP(ControlSurface):
             1000000.0 if time_span is None else float(time_span),
         )
 
+    @classmethod
+    def _serialize_note(cls, note):
+        return {
+            "note_id": cls._get(note, "note_id"),
+            "pitch": cls._get(note, "pitch"),
+            "start_time": cls._get(note, "start_time"),
+            "duration": cls._get(note, "duration"),
+            "velocity": cls._get(note, "velocity"),
+            "mute": cls._get(note, "mute"),
+            "probability": cls._get(note, "probability"),
+            "velocity_deviation": cls._get(note, "velocity_deviation"),
+            "release_velocity": cls._get(note, "release_velocity"),
+        }
+
     def _notes_from_clip(self, clip, window=None):
         """Read notes, preferring the extended API for its per-note attributes."""
         from_pitch, pitch_span, from_time, time_span = window or (0, 128, 0.0, 1000000.0)
 
         if hasattr(clip, "get_notes_extended"):
-            notes = []
-            for note in clip.get_notes_extended(from_pitch, pitch_span, from_time, time_span):
-                notes.append({
-                    "note_id": self._get(note, "note_id"),
-                    "pitch": self._get(note, "pitch"),
-                    "start_time": self._get(note, "start_time"),
-                    "duration": self._get(note, "duration"),
-                    "velocity": self._get(note, "velocity"),
-                    "mute": self._get(note, "mute"),
-                    "probability": self._get(note, "probability"),
-                    "velocity_deviation": self._get(note, "velocity_deviation"),
-                    "release_velocity": self._get(note, "release_velocity"),
-                })
-            return notes
+            return [
+                self._serialize_note(note)
+                for note in clip.get_notes_extended(from_pitch, pitch_span, from_time, time_span)
+            ]
 
         return [
             {"pitch": n[0], "start_time": n[1], "duration": n[2],
@@ -1929,6 +1937,262 @@ class AbletonMCP(ControlSurface):
             ]
             clip.set_notes(tuple(kept))
         return before
+
+    # ── Note editing ─────────────────────────────────────────────────────────
+
+    NOTE_EDIT_FIELDS = (
+        "pitch", "start_time", "duration", "velocity", "mute",
+        "probability", "velocity_deviation", "release_velocity",
+    )
+
+    @staticmethod
+    def _check_pitch_shift(notes, semitones):
+        """Refuse a shift that would push any note outside 0-127, naming them."""
+        overflowing = [n for n in notes if not 0 <= n["pitch"] + semitones <= 127]
+        if not overflowing:
+            return
+        shown = ", ".join(
+            "pitch %d at beat %s%s" % (
+                n["pitch"], n["start_time"],
+                "" if n.get("note_id") is None else " (id %s)" % n["note_id"])
+            for n in overflowing[:10]
+        )
+        more = "" if len(overflowing) <= 10 else ", and %d more" % (len(overflowing) - 10)
+        raise ValueError(
+            "shifting by %+d semitones would move %d note(s) outside 0-127: %s%s. "
+            "Narrow the window or use a smaller shift."
+            % (semitones, len(overflowing), shown, more)
+        )
+
+    @staticmethod
+    def _int_arg(params, name, default=None):
+        value = params.get(name)
+        if value is None:
+            value = default
+        if value is None:
+            raise ValueError("%s is required" % name)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("%s must be a whole number, got %r" % (name, value))
+        if number != int(number):
+            raise ValueError("%s must be a whole number, got %r" % (name, value))
+        return int(number)
+
+    def _midi_clip(self, params):
+        clip = self._resolve_clip(params)
+        if not self._get(clip, "is_midi_clip", False):
+            raise ValueError("%r is an audio clip and has no notes" % clip.name)
+        return clip
+
+    @staticmethod
+    def _in_window(pitch, start, window):
+        from_pitch, pitch_span, from_time, time_span = window
+        return (from_pitch <= pitch < from_pitch + pitch_span
+                and from_time <= start < from_time + time_span)
+
+    @staticmethod
+    def _legacy_replace_all(clip, notes):
+        if hasattr(clip, "remove_notes"):
+            clip.remove_notes(0.0, 0, 1000000.0, 128)
+        clip.set_notes(tuple(notes))
+
+    def _transpose_notes(self, params, respond):
+        clip = self._midi_clip(params)
+        semitones = self._int_arg(params, "semitones")
+        window = self._note_window(params)
+
+        if hasattr(clip, "apply_note_modifications"):
+            # apply_note_modifications only accepts the MidiNoteVector that
+            # get_notes_extended returned, mutated in place; new specs or dicts
+            # are rejected.
+            vector = clip.get_notes_extended(*window)
+            self._check_pitch_shift([self._serialize_note(n) for n in vector], semitones)
+            for note in vector:
+                note.pitch = note.pitch + semitones
+            if len(vector) and semitones:
+                clip.apply_note_modifications(vector)
+            return {"transposed": len(vector), "semitones": semitones,
+                    "clip": clip.name, "via": "apply_note_modifications"}
+
+        everything = list(clip.get_notes(0.0, 0, 1000000.0, 128))
+        inside = [n for n in everything if self._in_window(n[0], n[1], window)]
+        self._check_pitch_shift(
+            [{"pitch": n[0], "start_time": n[1]} for n in inside], semitones)
+        if inside and semitones:
+            self._legacy_replace_all(clip, [
+                (n[0] + semitones,) + tuple(n[1:]) if self._in_window(n[0], n[1], window)
+                else tuple(n)
+                for n in everything
+            ])
+        return {"transposed": len(inside), "semitones": semitones,
+                "clip": clip.name, "via": "set_notes"}
+
+    def _duplicate_notes(self, params, respond):
+        clip = self._midi_clip(params)
+        try:
+            time_offset = float(params.get("time_offset"))
+        except (TypeError, ValueError):
+            raise ValueError("time_offset must be a number of beats")
+        pitch_offset = self._int_arg(params, "pitch_offset", 0)
+        extend_clip = params.get("extend_clip", True) is not False
+        if time_offset == 0 and pitch_offset == 0:
+            raise ValueError(
+                "time_offset and pitch_offset are both 0, so the copies would land "
+                "exactly on the originals")
+
+        originals = self._notes_from_clip(clip, self._note_window(params))
+        if not originals:
+            return {"copied": 0, "clip": clip.name}
+        self._check_pitch_shift(originals, pitch_offset)
+        early = [n for n in originals if n["start_time"] + time_offset < 0]
+        if early:
+            raise ValueError(
+                "a time_offset of %s would move %d note(s) before the clip start "
+                "(the earliest starts at beat %s)"
+                % (time_offset, len(early), min(n["start_time"] for n in early)))
+
+        copies = []
+        for n in originals:
+            copy = dict(n)
+            copy.pop("note_id", None)
+            copy["pitch"] = n["pitch"] + pitch_offset
+            copy["start_time"] = n["start_time"] + time_offset
+            copies.append(copy)
+        copies = self._validate_notes(copies)
+        method = self._write_notes(clip, copies)
+
+        result = {"copied": len(copies), "clip": clip.name, "via": method}
+        end = max(n["start_time"] + n["duration"] for n in copies)
+        result.update(self._fit_clip_to(clip, end, extend_clip))
+        return result
+
+    def _fit_clip_to(self, clip, end, extend):
+        """Lengthen a Session clip so notes up to `end` play, rounded up to a bar."""
+        looping = bool(self._get(clip, "looping", False))
+        boundary = "loop_end" if looping else "end_marker"
+        current = float(self._get(clip, boundary, 0.0) or 0.0)
+        if end <= current + 1e-9:
+            return {}
+        if not extend or self._get(clip, "is_arrangement_clip", False):
+            return {"past_clip_end": True, boundary: current,
+                    "note": "some copies start or run past the clip's %s and will "
+                            "not all play" % boundary}
+
+        numerator = self._get(clip, "signature_numerator", 4) or 4
+        denominator = self._get(clip, "signature_denominator", 4) or 4
+        bar = numerator * 4.0 / denominator
+        bars = int(end / bar - 1e-9) + 1
+        new_end = bars * bar
+        setattr(clip, boundary, new_end)
+        return {"extended": boundary, boundary: new_end}
+
+    @classmethod
+    def _validated_note_edits(cls, raw):
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("changes must be a non-empty list of {note_id, ...} objects")
+        edits = []
+        seen = set()
+        for i, change in enumerate(raw):
+            if not isinstance(change, dict) or change.get("note_id") is None:
+                raise ValueError("change %d must be an object with a note_id" % i)
+            try:
+                note_id = int(change["note_id"])
+            except (TypeError, ValueError):
+                raise ValueError("change %d has a non-integer note_id" % i)
+            if note_id in seen:
+                raise ValueError("note %d is changed twice; merge the changes" % note_id)
+            seen.add(note_id)
+
+            unknown = [k for k in change if k != "note_id" and k not in cls.NOTE_EDIT_FIELDS]
+            if unknown:
+                raise ValueError("change %d has unknown field(s) %s; editable fields are %s"
+                                 % (i, ", ".join(sorted(unknown)), ", ".join(cls.NOTE_EDIT_FIELDS)))
+            fields = {}
+            try:
+                for key in cls.NOTE_EDIT_FIELDS:
+                    value = change.get(key)
+                    if value is None:
+                        continue
+                    if key == "pitch":
+                        value = int(value)
+                        if not 0 <= value <= 127:
+                            raise ValueError("change %d sets pitch %d, outside 0-127" % (i, value))
+                    elif key == "mute":
+                        value = bool(value)
+                    elif key == "start_time":
+                        value = float(value)
+                        if value < 0:
+                            raise ValueError("change %d moves note %d before the clip start" % (i, note_id))
+                    elif key == "duration":
+                        value = float(value)
+                        if value <= 0:
+                            raise ValueError("change %d sets a duration of %s; it must be positive" % (i, value))
+                    elif key == "probability":
+                        value = max(0.0, min(1.0, float(value)))
+                    elif key in ("velocity", "release_velocity"):
+                        value = max(0.0, min(127.0, float(value)))
+                    else:
+                        value = float(value)
+                    fields[key] = value
+            except (TypeError, ValueError) as e:
+                if "change %d" % i in str(e):
+                    raise
+                raise ValueError("change %d has a non-numeric value: %s" % (i, e))
+            if not fields:
+                raise ValueError("change %d for note %d changes nothing" % (i, note_id))
+            edits.append((note_id, fields))
+        return edits
+
+    def _notes_by_id(self, clip, wanted):
+        """Every note in the clip keyed by id, erroring on ids it does not hold."""
+        vector = clip.get_notes_extended(0, 128, 0.0, 1000000.0)
+        by_id = dict((self._get(note, "note_id"), note) for note in vector)
+        missing = [i for i in wanted if i not in by_id]
+        if missing:
+            raise ValueError(
+                "clip %r has no note(s) with id %s; note ids change when notes are "
+                "replaced, so re-read them with get_clip_notes"
+                % (clip.name, ", ".join(str(i) for i in missing)))
+        return vector, by_id
+
+    def _modify_notes(self, params, respond):
+        clip = self._midi_clip(params)
+        if not (hasattr(clip, "apply_note_modifications") and hasattr(clip, "get_notes_extended")):
+            raise RuntimeError(
+                "modify_notes needs Live 11 or newer (Clip.apply_note_modifications). "
+                "On this version, read with get_clip_notes, edit the list and write it "
+                "back with replace_clip_notes")
+        edits = self._validated_note_edits(params.get("changes"))
+        # Read the whole clip rather than get_notes_by_id: it lets unknown ids
+        # be reported before anything changes, and it yields the vector type
+        # apply_note_modifications insists on.
+        vector, by_id = self._notes_by_id(clip, [note_id for note_id, _ in edits])
+        for note_id, fields in edits:
+            note = by_id[note_id]
+            for key, value in fields.items():
+                setattr(note, key, value)
+        clip.apply_note_modifications(vector)
+        return {"modified": len(edits), "clip": clip.name,
+                "notes": [self._serialize_note(by_id[note_id]) for note_id, _ in edits]}
+
+    def _remove_notes_by_id(self, params, respond):
+        clip = self._midi_clip(params)
+        if not (hasattr(clip, "remove_notes_by_id") and hasattr(clip, "get_notes_extended")):
+            raise RuntimeError(
+                "remove_notes_by_id needs Live 11 or newer (Clip.remove_notes_by_id). "
+                "On this version, use clear_notes_from_clip with a window, or "
+                "replace_clip_notes")
+        raw = params.get("note_ids")
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("note_ids must be a non-empty list of note ids")
+        try:
+            note_ids = sorted(set(int(i) for i in raw))
+        except (TypeError, ValueError):
+            raise ValueError("note_ids must all be integers")
+        self._notes_by_id(clip, note_ids)
+        clip.remove_notes_by_id(tuple(note_ids))
+        return {"removed": len(note_ids), "clip": clip.name}
 
     # ── Devices ──────────────────────────────────────────────────────────────
 

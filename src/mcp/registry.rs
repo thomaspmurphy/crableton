@@ -19,6 +19,8 @@ pub enum ArgTy {
     Any,
     /// Array of MIDI note objects.
     Notes,
+    /// Array of `{note_id, ...fields to change}` objects for in-place edits.
+    NoteEdits,
     /// Array of `[time, value]` automation breakpoints.
     Points,
     /// Array of `{tool, arguments}` steps for the `batch` tool.
@@ -67,6 +69,28 @@ impl ArgDef {
                                          "description": "Live 11+ per-note chance." },
                         "velocity_deviation": { "type": "number",
                                                 "description": "Live 11+ velocity randomisation range." },
+                        "release_velocity": { "type": "number", "minimum": 0, "maximum": 127 }
+                    }
+                }
+            }),
+            ArgTy::NoteEdits => json!({
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "required": ["note_id"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "note_id": { "type": "integer",
+                                     "description": "The note's id, as returned by `get_clip_notes`." },
+                        "pitch": { "type": "integer", "minimum": 0, "maximum": 127 },
+                        "start_time": { "type": "number", "minimum": 0,
+                                        "description": "New start, in beats from the clip start." },
+                        "duration": { "type": "number", "description": "New length in beats." },
+                        "velocity": { "type": "number", "minimum": 0, "maximum": 127 },
+                        "mute": { "type": "boolean" },
+                        "probability": { "type": "number", "minimum": 0, "maximum": 1 },
+                        "velocity_deviation": { "type": "number" },
                         "release_velocity": { "type": "number", "minimum": 0, "maximum": 127 }
                     }
                 }
@@ -185,6 +209,12 @@ impl ToolDef {
     }
     pub fn notes(self, name: &'static str, d: impl Into<String>) -> Self {
         self.arg(name, d, ArgTy::Notes, true)
+    }
+    pub fn note_edits(self, name: &'static str, d: impl Into<String>) -> Self {
+        self.arg(name, d, ArgTy::NoteEdits, true)
+    }
+    pub fn int_list(self, name: &'static str, d: impl Into<String>) -> Self {
+        self.arg(name, d, ArgTy::IntList, true)
     }
     pub fn points(self, name: &'static str, d: impl Into<String>) -> Self {
         self.arg(name, d, ArgTy::Points, true)
@@ -341,7 +371,12 @@ fn coerce(arg: &ArgDef, value: &Value) -> Result<Value, String> {
             Value::String(_) => value.clone(),
             other => return Err(format!("`{name}` must be a string, got {other}")),
         },
-        ArgTy::Notes | ArgTy::Points | ArgTy::Steps | ArgTy::IntList | ArgTy::StrList => {
+        ArgTy::Notes
+        | ArgTy::NoteEdits
+        | ArgTy::Points
+        | ArgTy::Steps
+        | ArgTy::IntList
+        | ArgTy::StrList => {
             match value {
                 Value::Array(_) => value.clone(),
                 // Models sometimes hand back the JSON they were asked to build.
