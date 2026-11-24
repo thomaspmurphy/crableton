@@ -60,8 +60,11 @@ pub fn tools() -> Vec<ToolDef> {
              to lay down a run of consecutive copies: a 4-bar loop across 32 bars is one call, \
              not eight. A span already occupied by another clip is refused. The copies are \
              returned with their Arrangement `clip_index`, and `envelopes` lists each parameter \
-             the Session clip automates with whether the copies carry that envelope. Live \
-             keeps clip envelopes on the copies only when the track has no devices.",
+             the Session clip automates with whether the copies carry that envelope. Each is \
+             `carried` with `via` `clip` (envelope on the copy) or `track_lane` (track \
+             automation on the Arrangement lane, which the API cannot read or edit; rewrite \
+             the Session clip envelope and copy again). Envelopes on devices nested in racks \
+             are not detected.",
         )
         .track_ref()
         .int("clip_index", "Session clip slot to copy from.")
@@ -98,6 +101,7 @@ pub fn tools() -> Vec<ToolDef> {
             "track_index",
             "Restrict to one track. Omit to clear the Arrangement on every track.",
         )
+        .opt_text("expect_track_name", crate::tools::EXPECT_TRACK_NAME)
         .opt_num("from_time", "Only delete clips starting at or after this beat.")
         .opt_num("to_time", "Only delete clips starting before this beat."),
 

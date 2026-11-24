@@ -54,7 +54,8 @@ batch(steps: [
 ```
 
 Steps run in order and stop at the first failure unless `stop_on_error: false`.
-`create_locator` cannot go in a batch, because it needs more than one pass.
+`create_locator`, `get_meters` and `probe_entry` cannot go in a batch, because
+they need more than one pass.
 Neither can the tools crableton answers itself: `lom_reference`,
 `device_reference` and the `analyze_*` family.
 
@@ -85,6 +86,16 @@ set. Use them instead of guessing, and quote what they say.
 - `analyze_mix` reports each track's pitch range and centre, and which pairs
   compete for the same register.
 
+You cannot hear the set, but you can measure it:
+
+- `analyze_sample` gives a Simpler sample's pitch per window and the Transpose
+  and Detune that tune it to the set's root or fifth. Reach for it first when a
+  kick or bass "sounds out of tune" or a low end beats.
+- `get_meters` (while playing) gives each track's average and peak level;
+  `probe_entry(beat)` plays across a beat and names the tracks that enter
+  there. It starts playback, so the user hears it; say so. Neither runs in
+  `batch`. Levels are Live's 0 to 1 meter scale, not dB: compare tracks.
+
 They report measurements, not opinions, and each carries a caveat about what it
 cannot see. Respect those: register ranges are note fundamentals, so saturation
 and unison move where a part really sits.
@@ -99,6 +110,11 @@ it. A raw `0.63` means nothing, whereas `"2.5 kHz"` and
 Set parameters by `parameter_name` rather than index where you can; indices
 shift between device versions. Use `set_device_parameters` to dial in several at
 once.
+
+Prefer `display` over `value` for anything with units: `display: "220 Hz"`,
+`"-18 dB"`, `"4 ms"`, `"2:1"`, or a setting name. Raw values are non-linear
+(a Drive of 5 is not 5 dB), so guessing them overshoots. Check the `error` in the
+reply. Faders and sends take `volume_db` and `value_db`.
 
 To find instruments and effects, use `search_browser`, which returns the URIs
 `load_device` needs. Walking `get_browser_tree` by hand is slow and the layout
@@ -132,9 +148,14 @@ Two things to know:
 - **Automation belongs to a clip, and only a Session clip.** Live refuses to
   create an envelope on an Arrangement clip, answering "Not a session clip".
   So sequence it: write the envelope on the Session clip first, then
-  `duplicate_clip_to_arrangement`. The copies keep the automation only on a
-  track with no devices; with any instrument or effect on the track, Live
-  strips it, and the result's `envelopes` list shows `carried: false`. A
+  `duplicate_clip_to_arrangement`. Live carries the automation into the
+  Arrangement: on the copy as a clip envelope, or, on a track with devices, as
+  track automation on the Arrangement lane (the result's `envelopes` list shows
+  `via: "clip"` or `"track_lane"`, and `carried: false` only if neither). Track-lane
+  automation cannot be read or edited through the API: to change it, rewrite
+  the Session clip envelope and copy again. `get_device_parameters` shows
+  `automation_state` (0 none, 1 active, 2 overridden). Envelopes on devices
+  nested in racks are not detected. A
   clip already sitting in the Arrangement cannot have automation created on it
   through the API; that needs the mouse. Say so plainly rather than implying
   it was written.
@@ -153,6 +174,18 @@ legible to the person looking at the screen.
 To redo an arrangement pass, clear the old one first: `clear_arrangement`
 (whole track, all tracks, or a beat range) and `clear_locators`. Otherwise you
 are layering a new arrangement on top of the old one.
+
+For long, continuous automation, such as fades over dozens of bars or parts that
+loop at different lengths, write one long Session clip per track that covers
+the whole piece. Write the notes across its full length and its envelopes from
+start to end, then copy it to the Arrangement once. Its envelopes become the
+track's automation lanes. Two traps:
+
+- A lane is one continuous line, so it holds its last value through any later
+  clip whose Session source has no envelope for that parameter.
+- Clearing clips does not clear lanes. When you redo a pass, give every
+  parameter that was automated before a new envelope. A one-point envelope is
+  not treated as automation, so use two points.
 
 ## Destructive changes
 

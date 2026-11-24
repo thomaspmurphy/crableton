@@ -8,6 +8,7 @@ Live 11's extended note API and the older tuple API.
 Run with: python3 remote_script/test_remote_script.py
 """
 
+import math
 import os
 import sys
 import types
@@ -69,6 +70,7 @@ class FakeParameter(object):
     def __init__(self, minimum=0.0, maximum=1.0):
         self.min = minimum
         self.max = maximum
+        self.automation_state = 0
 
 
 class TakeCommandTests(unittest.TestCase):
@@ -572,6 +574,9 @@ class FakeSlot(object):
     def has_clip(self):
         return self.clip is not None
 
+    def duplicate_clip_to(self, target):
+        target.clip = FakeLiveClip(self.clip.name, list(self.clip.notes))
+
 
 class ClipLane(object):
     """What a track's main Arrangement lane and a take lane have in common."""
@@ -634,6 +639,7 @@ class FakeTrack(ClipLane):
     lane_type = FakeTakeLane
 
     dropped_on_copy = ()
+    track_lane_on_copy = ()
 
     def duplicate_clip_to_arrangement(self, clip, at):
         """As Live 12.4.6 did for a volume envelope: the copy carries the
@@ -642,7 +648,10 @@ class FakeTrack(ClipLane):
         copy = FakeLiveClip(clip.name, list(clip.notes), at, clip.length)
         copy.automation_envelopes = [
             FakeEnvelope(e.parameter, e.events) for e in clip.automation_envelopes
-            if e.parameter not in self.dropped_on_copy]
+            if e.parameter not in self.dropped_on_copy
+            and e.parameter not in self.track_lane_on_copy]
+        for parameter in self.track_lane_on_copy:
+            parameter.automation_state = 1
         self._place(copy)
 
     def delete_clip(self, clip):
@@ -654,6 +663,18 @@ class FakeTrack(ClipLane):
         lane = self.lane_type("Take %d" % (len(self.take_lanes) + 1))
         self.take_lanes.append(lane)
         return lane
+
+
+class FakeCue(object):
+    """time is read-only, as on Live's CuePoint."""
+
+    def __init__(self, time):
+        self._time = time
+        self.name = ""
+
+    @property
+    def time(self):
+        return self._time
 
 
 class FakeSong(object):
@@ -670,6 +691,19 @@ class FakeSong(object):
         self.started_from = None
         self.lag = False
         self.queued = []
+        self.cue_points = []
+        self.drift = 0.0
+
+    def set_or_delete_cue(self):
+        for cue in self.cue_points:
+            if abs(cue.time - self.current_song_time) < 1e-6:
+                self.cue_points.remove(cue)
+                return
+        self.cue_points.append(FakeCue(self.current_song_time))
+        self.cue_points.sort(key=lambda c: c.time)
+
+    def continue_playing(self):
+        self.is_playing = True
 
     def _later(self, change):
         if self.lag:
@@ -710,14 +744,20 @@ class LiveSetScript(object):
         self.script.log_message = lambda message: None
         self.pending = []
         self.script._defer = lambda ticks, fn: self.pending.append(fn)
+        # Each tick is a tenth of a second, as Live's display tick roughly is.
+        self.clock = 0.0
+        self.script._now = lambda: self.clock
 
     def __getattr__(self, name):
         handler = getattr(self.script, "_" + name)
         return lambda params, respond=None: handler(params, respond)
 
     def tick(self):
+        self.clock += 0.1
         self.song.apply_queued()
         pending, self.pending = self.pending, []
+        if self.song.is_playing:
+            self.song.current_song_time += self.song.drift
         for fn in pending:
             fn()
 
@@ -1038,7 +1078,7 @@ class DuplicateClipToArrangementTests(unittest.TestCase):
             {"track_index": 0, "clip_index": 0, "destination_time": 4.0, "repeats": 2})
         self.assertEqual(result["envelopes"], [
             {"device": "Mixer", "parameter": "Track Volume",
-             "carried": True, "missing_on": []}])
+             "carried": True, "via": "clip", "missing_on": []}])
         self.assertNotIn("note", result)
         read = live.get_clip_envelope(dict(ARRANGEMENT, clip_index=2,
                                            device_index=-1, parameter_index=0))
@@ -1054,8 +1094,22 @@ class DuplicateClipToArrangementTests(unittest.TestCase):
             {"track_index": 0, "clip_index": 0, "destination_time": 4.0})
         self.assertEqual(result["envelopes"], [
             {"device": "Mixer", "parameter": "Track Volume",
-             "carried": False, "missing_on": [1]}])
+             "carried": False, "via": None, "missing_on": [1]}])
         self.assertIn("Mixer Track Volume", result["note"])
+
+    def test_automation_moved_to_the_track_lane_counts_as_carried(self):
+        live = a_set()
+        track = live.song.tracks[0]
+        live.set_clip_envelope(dict(SESSION, points=[[0, 0.2], [4, 0.8]],
+                                    device_index=-1, parameter_index=0))
+        track.track_lane_on_copy = (track.volume,)
+        result = live.duplicate_clip_to_arrangement(
+            {"track_index": 0, "clip_index": 0, "destination_time": 4.0})
+        self.assertEqual(result["envelopes"], [
+            {"device": "Mixer", "parameter": "Track Volume",
+             "carried": True, "via": "track_lane", "missing_on": []}])
+        self.assertIn("Arrangement automation lane", result["note"])
+        self.assertNotIn("did not carry", result["note"])
 
 
 class DeleteArrangementClipTests(unittest.TestCase):
@@ -1188,6 +1242,455 @@ class ArrangementRecordingTests(unittest.TestCase):
 
         state = live.stop_arrangement_recording({})
         self.assertFalse(state["was_recording"] or live.song.is_playing)
+
+
+class TrackNameGuardTests(unittest.TestCase):
+    """`expect_track_name` refuses a write when the set changed under the caller."""
+
+    def test_a_matching_name_passes(self):
+        live = a_set()
+        live.set_track_name({"track_index": 1, "expect_track_name": " Vox ", "name": "Lead"})
+        self.assertEqual(live.song.tracks[1].name, "Lead")
+
+    def test_a_mismatch_changes_nothing_and_says_where_the_track_went(self):
+        live = a_set()
+        live.song.tracks.insert(0, FakeTrack("Bass"))
+        with self.assertRaises(ValueError) as caught:
+            live.set_track_name({"track_index": 0, "expect_track_name": "Keys", "name": "Piano"})
+        self.assertEqual(
+            str(caught.exception),
+            'regular track 0 is "Bass", expected "Keys"; the set changed '
+            "(Keys is now at index 1). Re-read with get_tracks.")
+        self.assertEqual([t.name for t in live.song.tracks], ["Bass", "Keys", "Vox"])
+
+    def test_the_match_is_case_sensitive(self):
+        with self.assertRaises(ValueError) as caught:
+            a_set().script._resolve_track({"track_index": 0, "expect_track_name": "keys"})
+        self.assertIn("keys is not in the set", str(caught.exception))
+
+    def test_every_index_holding_the_name_is_listed(self):
+        live = a_set()
+        live.song.tracks.extend([FakeTrack("Keys"), FakeTrack("Drums")])
+        with self.assertRaises(ValueError) as caught:
+            live.script._resolve_track({"track_index": 3, "expect_track_name": "Keys"})
+        self.assertIn("Keys is now at indices 0, 2", str(caught.exception))
+
+    def test_return_tracks_match_with_or_without_their_letter(self):
+        live = a_set()
+        live.song.return_tracks = [FakeTrack("A-Reverb"), FakeTrack("B-Delay")]
+        for expected in ("A-Reverb", "Reverb"):
+            track = live.script._resolve_track(
+                {"track_index": 0, "track_type": "return", "expect_track_name": expected})
+            self.assertEqual(track.name, "A-Reverb")
+        with self.assertRaises(ValueError) as caught:
+            live.script._resolve_track(
+                {"track_index": 0, "track_type": "return", "expect_track_name": "Delay"})
+        self.assertIn("Delay is now at index 1", str(caught.exception))
+        # The prefix is only Live's on return tracks.
+        live.song.tracks[0].name = "A-Keys"
+        with self.assertRaises(ValueError):
+            live.script._resolve_track({"track_index": 0, "expect_track_name": "Keys"})
+
+    def test_master_is_only_checked_when_guarded(self):
+        live = a_set()
+        live.song.master_track = FakeTrack("Master")
+        master = {"track_type": "master", "track_index": 7}
+        self.assertEqual(live.script._resolve_track(master).name, "Master")
+        self.assertEqual(
+            live.script._resolve_track(dict(master, expect_track_name="Master")).name, "Master")
+        with self.assertRaises(ValueError):
+            live.script._resolve_track(dict(master, expect_track_name="Keys"))
+
+    def test_duplicate_clip_checks_each_guard_against_its_own_track(self):
+        live = a_set()
+        copy = {"track_index": 0, "clip_index": 0, "target_track_index": 1,
+                "target_clip_index": 0, "expect_track_name": "Keys"}
+        for bad in (dict(copy, expect_target_track_name="Keys"),
+                    dict(copy, expect_track_name="Vox", expect_target_track_name="Vox")):
+            with self.assertRaises(ValueError):
+                live.duplicate_clip(bad)
+            self.assertFalse(live.song.tracks[1].clip_slots[0].has_clip)
+
+        # The source's guard is not applied to the target.
+        result = live.duplicate_clip(copy)
+        self.assertEqual(result["track"], "Vox")
+        live.song.tracks[1].clip_slots[0].clip = None
+        live.duplicate_clip(dict(copy, expect_target_track_name="Vox"))
+        self.assertTrue(live.song.tracks[1].clip_slots[0].has_clip)
+
+    def test_load_drum_kit_forwards_the_guard(self):
+        live = a_set()
+        loads = []
+
+        def load(params, respond):
+            loads.append(params)
+            track = live.script._resolve_track(params)
+            return {"loaded": params["uri"], "track": track.name}
+
+        live.script._load_browser_item = load
+        live.script._get_browser_items_at_path = lambda params, respond: {
+            "items": [{"is_loadable": True, "uri": "kit"}]}
+        kit = {"track_index": 1, "rack_uri": "rack", "kit_path": "drums",
+               "expect_track_name": "Vox"}
+        self.assertEqual(live.load_drum_kit(kit)["track"], "Vox")
+        self.assertEqual([p["expect_track_name"] for p in loads], ["Vox", "Vox"])
+
+        del loads[:]
+        with self.assertRaises(ValueError):
+            live.load_drum_kit(dict(kit, expect_track_name="Keys"))
+        self.assertEqual(len(loads), 1)
+
+    def test_set_selection_honours_the_guard(self):
+        live = a_set()
+        live.song.view = types.SimpleNamespace(selected_track=None)
+        with self.assertRaises(ValueError):
+            live.set_selection({"track_index": 1, "expect_track_name": "Keys"})
+        self.assertIsNone(live.song.view.selected_track)
+        self.assertEqual(
+            live.set_selection({"track_index": 1, "expect_track_name": "Vox"})["selected"]["track"],
+            "Vox")
+
+    def test_a_guarded_batch_step_stops_the_batch(self):
+        live = a_set()
+        live.script._handlers = live.script._build_handlers()
+        rename = lambda index, expected, name: {"type": "set_track_name", "params": {
+            "track_index": index, "expect_track_name": expected, "name": name}}
+        result = live.batch({"commands": [
+            rename(0, "Keys", "Piano"),
+            rename(1, "Keys", "Organ"),
+            rename(1, "Vox", "Lead"),
+        ]})
+        self.assertEqual((result["ran"], result["failed"]), (2, 1))
+        self.assertIn('regular track 1 is "Vox"', result["results"][1]["message"])
+        self.assertEqual([t.name for t in live.song.tracks], ["Piano", "Vox"])
+
+    def test_the_script_advertises_the_guard(self):
+        live = a_set()
+        live.script._handlers = {}
+        live.script.application = lambda: None
+        self.assertTrue(live.script._get_script_info()["features"]["track_name_guard"])
+
+    def test_a_guard_without_an_index_is_refused_rather_than_widened(self):
+        live = a_set()
+        before = [len(t.arrangement_clips) for t in live.song.tracks]
+        for call in (live.clear_arrangement, live.set_selection):
+            with self.assertRaises(ValueError) as caught:
+                call({"expect_track_name": "Keys"})
+            self.assertIn("without track_index", str(caught.exception))
+        self.assertEqual([len(t.arrangement_clips) for t in live.song.tracks], before)
+
+
+class CreateLocatorTests(unittest.TestCase):
+    def create(self, live, params):
+        responses = []
+        result = live.create_locator(params, responses.append)
+        return live.settle(result, responses)
+
+    def test_a_playing_transport_is_paused_so_the_locator_lands_exactly(self):
+        live = a_set()
+        live.song.is_playing = True
+        live.song.current_song_time = 10.0
+        live.song.drift = 0.79
+        result = self.create(live, {"time": 64.0, "name": "Drop"})
+        self.assertEqual(result["time"], 64.0)
+        self.assertEqual(result["name"], "Drop")
+        self.assertTrue(result["interrupted_playback"])
+        self.assertEqual([c.time for c in live.song.cue_points], [64.0])
+        self.assertTrue(live.song.is_playing)
+        self.assertEqual(live.song.current_song_time, 10.0)
+
+    def test_a_stopped_transport_is_left_stopped_at_its_old_position(self):
+        live = a_set()
+        live.song.current_song_time = 3.0
+        result = self.create(live, {"time": 8.0})
+        self.assertEqual(result["time"], 8.0)
+        self.assertNotIn("interrupted_playback", result)
+        self.assertFalse(live.song.is_playing)
+        self.assertEqual(live.song.current_song_time, 3.0)
+
+    def test_inside_a_batch_it_is_refused_unless_a_locator_already_exists(self):
+        live = a_set()
+        with self.assertRaises(RuntimeError):
+            live.create_locator({"time": 8.0})
+        live.song.cue_points.append(FakeCue(8.0))
+        self.assertTrue(live.create_locator({"time": 8.0, "name": "A"})["renamed"])
+
+
+# ── Set by displayed value ───────────────────────────────────────────────────
+
+
+class DisplayParameter(FakeParameter):
+    """A parameter whose display is a function of its raw value, as in Live."""
+
+    def __init__(self, name, fmt, minimum=0.0, maximum=1.0, quantized=False, items=None):
+        FakeParameter.__init__(self, minimum, maximum)
+        self.name = name
+        self.fmt = fmt
+        self.value = minimum
+        self.is_quantized = quantized
+        if items is not None:
+            self.value_items = items
+
+    def str_for_value(self, value):
+        return self.fmt(value)
+
+
+def frequency(v):
+    hz = 20.0 * 1000.0 ** v
+    return "%.0f Hz" % hz if hz < 1000 else "%.2f kHz" % (hz / 1000.0)
+
+
+def fader(v):
+    if v <= 0:
+        return "-inf dB"
+    return "%.1f dB" % (40.0 * math.log10(v / 0.85))
+
+
+def attack(v):
+    seconds = 0.001 * 20000.0 ** v
+    return "%.2f ms" % (seconds * 1000) if seconds < 1 else "%.2f s" % seconds
+
+
+class ParseDisplayTests(unittest.TestCase):
+    def test_units_are_canonical(self):
+        parse = mcp.parse_display
+        self.assertEqual(parse("1.50 kHz"), (1500.0, "hz"))
+        self.assertEqual(parse("220 Hz"), (220.0, "hz"))
+        self.assertEqual(parse("3.00 ms"), (0.003, "s"))
+        self.assertEqual(parse("2.5 s"), (2.5, "s"))
+        self.assertEqual(parse("-18 dB"), (-18.0, "db"))
+        self.assertEqual(parse("-inf dB"), (float("-inf"), "db"))
+        self.assertEqual(parse("90 %"), (90.0, "%"))
+        self.assertEqual(parse("+7 st"), (7.0, "st"))
+        self.assertEqual(parse("-18 ct"), (-18.0, "ct"))
+        self.assertEqual(parse("2:1"), (2.0, "ratio"))
+        self.assertEqual(parse("2.00 : 1"), (2.0, "ratio"))
+        self.assertEqual(parse("1.5k"), (1500.0, ""))
+        self.assertEqual(parse("1/16"), (0.0625, "fraction"))
+        self.assertEqual(parse("20L"), (-20.0, "pan"))
+        self.assertEqual(parse("C"), (0.0, "pan"))
+        self.assertIsNone(parse("Bandpass"))
+
+
+class SetByDisplayTests(unittest.TestCase):
+    def device_set(self, *parameters):
+        live = a_set()
+        device = types.SimpleNamespace(name="EQ", class_name="Eq8",
+                                       parameters=list(parameters))
+        live.song.tracks[0].devices = [device]
+        return live
+
+    def set(self, live, name, display):
+        return live.set_device_parameter({"track_index": 0, "device_index": 0,
+                                          "parameter_name": name, "display": display})
+
+    def test_bisects_a_monotonic_frequency(self):
+        freq = DisplayParameter("Frequency", frequency)
+        live = self.device_set(freq)
+        for wanted, shown in (("220 Hz", "220 Hz"), ("1.5 kHz", "1.50 kHz"),
+                              ("1500 Hz", "1.50 kHz"), ("90hz", "90 Hz")):
+            result = self.set(live, "Frequency", wanted)
+            self.assertEqual(result["display"], shown, wanted)
+            self.assertEqual(result["method"], "bisection")
+            self.assertEqual(result["error"], 0.0)
+
+    def test_clamps_a_target_out_of_range_and_reports_the_error(self):
+        live = self.device_set(DisplayParameter("Frequency", frequency))
+        result = self.set(live, "Frequency", "50 kHz")
+        self.assertEqual(result["display"], "20.00 kHz")
+        self.assertEqual(result["error"], -30000.0)
+
+    def test_times_in_ms_and_seconds_share_a_unit(self):
+        live = self.device_set(DisplayParameter("Attack", attack))
+        self.assertEqual(self.set(live, "Attack", "3 ms")["display"], "3.00 ms")
+        self.assertEqual(self.set(live, "Attack", "2.5 s")["display"], "2.50 s")
+
+    def test_falls_back_to_a_scan_when_the_display_is_not_monotonic(self):
+        bumpy = DisplayParameter("Shape", lambda v: "%.0f %%" % (100 * abs(math.sin(6 * v))))
+        live = self.device_set(bumpy)
+        result = self.set(live, "Shape", "90 %")
+        self.assertEqual(result["method"], "scan")
+        self.assertEqual(result["display"], "90 %")
+
+    def test_quantized_parameters_match_their_settings_by_name(self):
+        kind = DisplayParameter("Filter Type", lambda v: ["LP", "HP", "BP", "Notch"][int(v)],
+                                0.0, 3.0, quantized=True, items=["LP", "HP", "BP", "Notch"])
+        live = self.device_set(kind)
+        result = self.set(live, "Filter Type", "bp")
+        self.assertEqual(kind.value, 2.0)
+        self.assertEqual(result["display"], "BP")
+        with self.assertRaises(ValueError) as caught:
+            self.set(live, "Filter Type", "Comb")
+        self.assertIn("Notch", str(caught.exception))
+
+    def test_ratios(self):
+        ratio = DisplayParameter("Ratio", lambda v: "%.2f : 1" % (1 + 99 * v * v))
+        live = self.device_set(ratio)
+        self.assertEqual(self.set(live, "Ratio", "2:1")["display"], "2.00 : 1")
+
+    def test_a_unit_the_parameter_does_not_show_is_refused(self):
+        live = self.device_set(DisplayParameter("Frequency", frequency))
+        with self.assertRaises(ValueError) as caught:
+            self.set(live, "Frequency", "-6 dB")
+        self.assertIn("cannot be compared", str(caught.exception))
+        with self.assertRaises(ValueError):
+            self.set(live, "Frequency", "loud")
+
+    def test_value_and_display_are_exclusive(self):
+        live = self.device_set(DisplayParameter("Frequency", frequency))
+        with self.assertRaises(ValueError):
+            live.set_device_parameter({"track_index": 0, "device_index": 0,
+                                       "parameter_name": "Frequency"})
+        with self.assertRaises(ValueError):
+            live.set_device_parameter({"track_index": 0, "device_index": 0,
+                                       "parameter_name": "Frequency", "value": 0.5,
+                                       "display": "220 Hz"})
+
+    def test_set_device_parameters_mixes_raw_and_displayed_values(self):
+        freq = DisplayParameter("Frequency", frequency)
+        gain = DisplayParameter("Gain", fader)
+        live = self.device_set(freq, gain)
+        result = live.set_device_parameters({"track_index": 0, "device_index": 0, "values": [
+            {"name": "Frequency", "display": "220 Hz"},
+            {"name": "Gain", "value": 0.85},
+            {"name": "Gain"},
+        ]})
+        self.assertEqual(result["applied"][0]["display"], "220 Hz")
+        self.assertEqual(result["applied"][1]["display"], "0.0 dB")
+        self.assertEqual(result["failed"][0]["at"], 2)
+
+    def test_mixer_volume_and_sends_in_decibels(self):
+        live = a_set()
+        track = live.song.tracks[0]
+        volume = DisplayParameter("Track Volume", fader)
+        send = DisplayParameter("A-Reverb", fader)
+        track.panning.value = 0.0
+        track.mixer_device = types.SimpleNamespace(
+            volume=volume, panning=track.panning, track_activator=FakeParameter(), sends=[send])
+        result = live.set_track_mixer({"track_index": 0, "volume_db": -6})
+        self.assertEqual(result["volume_display"], "-6.0 dB")
+        self.assertEqual(result["volume_error_db"], 0.0)
+        result = live.set_track_send({"track_index": 0, "send_index": 0, "value_db": -12})
+        self.assertEqual(result["display"], "-12.0 dB")
+        live.set_track_mixer({"track_index": 0, "volume_db": float("-inf")})
+        self.assertEqual(volume.value, 0.0)
+        with self.assertRaises(ValueError):
+            live.set_track_mixer({"track_index": 0, "volume": 0.5, "volume_db": -6})
+
+
+# ── Meters ───────────────────────────────────────────────────────────────────
+
+
+class MeteredTrack(FakeTrack):
+    """A track whose meter follows the song position, through `level(time)`."""
+
+    def __init__(self, name, level, song=None):
+        FakeTrack.__init__(self, name)
+        self.level = level
+        self.song = song
+
+    @property
+    def output_meter_level(self):
+        return self.level(self.song.current_song_time)
+
+    @property
+    def output_meter_left(self):
+        return self.output_meter_level
+
+    @property
+    def output_meter_right(self):
+        return self.output_meter_level * 0.5
+
+
+def metered_set():
+    keys = MeteredTrack("Keys", lambda t: 0.5)
+    sub = MeteredTrack("Sub", lambda t: 0.7 if t >= 16 else 0.0)
+    pad = MeteredTrack("Pad", lambda t: 0.6 if t < 16 else 0.02)
+    live = LiveSetScript([keys, sub, pad])
+    for track in live.song.tracks:
+        track.song = live.song
+    live.song.return_tracks = [MeteredTrack("A-Reverb", lambda t: 0.2, live.song)]
+    live.song.tempo = 120.0
+    return live
+
+
+class MeterTests(unittest.TestCase):
+    def test_samples_every_track_across_ticks(self):
+        live = metered_set()
+        responses = []
+        result = live.get_meters({"duration": 1.0, "interval": 0.1}, responses.append)
+        self.assertIs(result, mcp.DEFERRED)
+        report = live.settle(result, responses, ticks=30)
+        self.assertIn(report["samples"], (11, 12))  # float drift on the fake clock
+        self.assertAlmostEqual(report["interval"], 0.1)
+        names = [(t["type"], t["name"]) for t in report["tracks"]]
+        self.assertEqual(names, [("regular", "Keys"), ("regular", "Sub"), ("regular", "Pad"),
+                                 ("return", "A-Reverb")])
+        keys = report["tracks"][0]
+        self.assertEqual((keys["avg"], keys["peak"], keys["peak_right"]), (0.5, 0.5, 0.25))
+        self.assertIn("stopped", report["warning"])
+
+    def test_refuses_a_batch_and_bad_windows(self):
+        live = metered_set()
+        with self.assertRaises(RuntimeError):
+            live.get_meters({"duration": 1.0})
+        with self.assertRaises(ValueError):
+            live.get_meters({"duration": 300}, lambda r: None)
+
+    def test_probe_flags_what_enters_and_restores_the_playhead(self):
+        live = metered_set()
+        live.song.current_song_time = 40.0
+        live.song.drift = 0.25
+        responses = []
+        result = live.probe_entry({"beat": 16, "preroll": 5, "after": 4}, responses.append)
+        report = live.settle(result, responses, ticks=100)
+        self.assertEqual(report["entered"], ["Sub"])
+        self.assertEqual(report["left"], ["Pad"])
+        self.assertEqual(report["rose"], [])
+        self.assertEqual(report["tracks"][0]["name"], "Sub")
+        self.assertTrue(report["tracks"][0]["entered"])
+        self.assertGreater(report["samples"]["before"], 10)
+        self.assertGreater(report["samples"]["after"], 10)
+        self.assertEqual(report["song_time"]["start"], 11.0)
+        self.assertFalse(live.song.is_playing)
+        self.assertEqual(live.song.current_song_time, 40.0)
+        self.assertEqual(report["restored_to"], 40.0)
+
+
+# ── Simpler samples ──────────────────────────────────────────────────────────
+
+
+class SimplerSampleTests(unittest.TestCase):
+    def test_reports_the_file_and_pitch_controls(self):
+        live = a_set()
+        transpose = DisplayParameter("Transpose", str, -48, 48)
+        transpose.value = 2.0
+        simpler = types.SimpleNamespace(
+            name="Kick", class_name="OriginalSimpler",
+            parameters=[DisplayParameter("Device On", str), transpose,
+                        DisplayParameter("Detune", str, -50, 50)],
+            sample=types.SimpleNamespace(file_path="/tmp/kick.wav", sample_rate=44100,
+                                         length=39514, start_marker=0, end_marker=39514))
+        live.song.tracks[0].devices = [simpler]
+        info = live.get_simpler_sample({"track_index": 0, "device_index": 0,
+                                        "expect_track_name": "Keys"})
+        self.assertEqual(info["file_path"], "/tmp/kick.wav")
+        self.assertEqual((info["transpose"], info["detune"]), (2.0, -50))
+
+    def test_other_devices_and_empty_simplers_are_refused(self):
+        live = a_set()
+        live.song.tracks[0].devices = [
+            types.SimpleNamespace(name="EQ", class_name="Eq8", parameters=[]),
+            types.SimpleNamespace(name="Empty", class_name="OriginalSimpler", parameters=[],
+                                  sample=None),
+        ]
+        with self.assertRaises(ValueError) as caught:
+            live.get_simpler_sample({"track_index": 0, "device_index": 0})
+        self.assertIn("not a Simpler", str(caught.exception))
+        with self.assertRaises(ValueError) as caught:
+            live.get_simpler_sample({"track_index": 0, "device_index": 1})
+        self.assertIn("no sample", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

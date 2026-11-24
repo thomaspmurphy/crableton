@@ -30,26 +30,36 @@ pub fn tools() -> Vec<ToolDef> {
             "set_device_parameter",
             "set_device_parameter",
             "Set one device parameter. Identify it by index or by name. Name is safer, since \
-             indices shift between device versions. Values are in the parameter's own units \
-             and are clamped to its range; for a quantized parameter, pass the position of the \
-             setting you want.",
+             indices shift between device versions. Give either `value`, in the parameter's \
+             own units and clamped to its range (for a quantized parameter, the position of \
+             the setting), or `display`, the value as Live shows it (\"220 Hz\", \"-18 dB\", \
+             \"3 ms\", \"2:1\", or a setting's name). Raw values are often non-linear, so \
+             prefer `display` for frequencies, times, gains and ratios. The reply gives the \
+             display Live settled on and the error against the target.",
         )
         .device_ref()
         .opt_int("parameter_index", "Index into the device's parameters.")
         .opt_text("parameter_name", "Parameter name as reported by `get_device_parameters`. Case-insensitive.")
-        .num("value", "New value, in the parameter's own units."),
+        .opt_num("value", "New value, in the parameter's own units.")
+        .opt_text(
+            "display",
+            "Target as Live displays it, instead of `value`: a number with a unit (Hz, kHz, \
+             ms, s, dB, %, st, ct), a ratio such as \"4:1\", a pan such as \"20L\", or for a \
+             quantized parameter one of its `value_items`. Searched with Live's own formatter.",
+        ),
 
         ToolDef::new(
             "set_device_parameters",
             "set_device_parameters",
             "Set several parameters of one device at once, dialling in a whole patch in a \
-             single pass rather than one round trip per knob.",
+             single pass rather than one round trip per knob. Each entry takes a raw `value` \
+             or a `display` target, as `set_device_parameter` does.",
         )
         .device_ref()
         .opt_any(
             "values",
-            "Array of `{\"name\": \"Filter Freq\", \"value\": 800}` or \
-             `{\"index\": 12, \"value\": 800}` objects.",
+            "Array of `{\"name\": \"Filter Freq\", \"display\": \"800 Hz\"}`, \
+             `{\"name\": \"Filter Freq\", \"value\": 0.4}` or `{\"index\": 12, ...}` objects.",
         ),
 
         ToolDef::new(

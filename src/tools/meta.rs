@@ -80,6 +80,7 @@ pub fn tools() -> Vec<ToolDef> {
         .opt_text("track_type", "Which track list `track_index` indexes into.")
         .choices(&["regular", "return", "master"])
         .default(json!("regular"))
+        .opt_text("expect_track_name", crate::tools::EXPECT_TRACK_NAME)
         .opt_int("clip_index", "Clip slot or arrangement position, for clip targets.")
         .opt_text("view", "Which view the clip lives in.")
         .choices(&["session", "arrangement"])

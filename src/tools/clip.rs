@@ -55,6 +55,10 @@ pub fn tools() -> Vec<ToolDef> {
         )
         .clip_ref()
         .opt_int("target_track_index", "Destination track. Defaults to the source track.")
+        .opt_text(
+            "expect_target_track_name",
+            "Like `expect_track_name`, for the destination track: its name as you last read it.",
+        )
         .int("target_clip_index", "Destination clip slot, which must be empty."),
 
         ToolDef::new("fire_clip", "fire_clip", "Launch a clip.").clip_ref(),
@@ -174,9 +178,10 @@ pub fn tools() -> Vec<ToolDef> {
              the Arrangement.\n\n\
              Live only creates clip automation on **Session** clips, it refuses on \
              Arrangement clips. So the order matters: write the envelope on the Session clip \
-             first, then `duplicate_clip_to_arrangement`. Copies keep the envelope only on a \
-             track with no devices: with any instrument or effect on the track, Live strips \
-             clip envelopes from the copy. An Arrangement clip that already carries an envelope for the parameter can be \
+             first, then `duplicate_clip_to_arrangement`. The copy carries the automation: as \
+             a clip envelope, or on a track with devices as track automation on the \
+             Arrangement lane, which the API cannot read or edit (rewrite the Session clip \
+             envelope and copy again). An Arrangement clip that already carries an envelope for the parameter can be \
              rewritten in place; one without cannot be given one through the API. Track-level \
              Arrangement automation is not reachable at all.",
         )

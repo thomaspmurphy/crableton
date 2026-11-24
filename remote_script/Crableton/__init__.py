@@ -19,8 +19,11 @@
 from __future__ import absolute_import, print_function, unicode_literals
 
 import json
+import math
+import re
 import socket
 import threading
+import time
 import traceback
 
 from _Framework.ControlSurface import ControlSurface
@@ -36,7 +39,7 @@ except ImportError:
 DEFAULT_PORT = 9878
 HOST = "127.0.0.1"
 
-SCRIPT_VERSION = "2.2.0"
+SCRIPT_VERSION = "2.4.0"
 PROTOCOL_VERSION = 2
 
 # Sentinel returned by handlers that will answer on a later tick.
@@ -107,6 +110,97 @@ def _name_of(table, index, default=None):
         return table[int(index)]
     except (IndexError, TypeError, ValueError):
         return default
+
+
+# ── Displayed values ─────────────────────────────────────────────────────────
+# Live formats every parameter for display ("1.50 kHz", "-12.0 dB", "4.00 : 1")
+# and the raw value behind it is often non-linear. Parsing both sides to a
+# number in a canonical unit lets a target like "220 Hz" be searched for.
+
+_UNITS = {
+    "": ("", 1.0),
+    "k": ("", 1000.0),
+    "hz": ("hz", 1.0),
+    "khz": ("hz", 1000.0),
+    "s": ("s", 1.0),
+    "sec": ("s", 1.0),
+    "ms": ("s", 0.001),
+    "db": ("db", 1.0),
+    "%": ("%", 1.0),
+    "st": ("st", 1.0),
+    "semitones": ("st", 1.0),
+    "ct": ("ct", 1.0),
+    "cent": ("ct", 1.0),
+    "cents": ("ct", 1.0),
+}
+_NUMBER = r"[+-]?(?:inf|\d+(?:\.\d*)?|\.\d+)"
+_NUMBER_WITH_UNIT = re.compile(r"^(%s)\s*(.*)$" % _NUMBER)
+_RATIO = re.compile(r"^(%s)\s*:\s*1$" % _NUMBER)
+_FRACTION = re.compile(r"^(\d+)\s*/\s*(\d+)$")
+_PAN = re.compile(r"^(\d+(?:\.\d*)?)\s*([lr])$")
+
+# How many points the monotonicity check and the fallback scan sample.
+DISPLAY_GRID = 32
+DISPLAY_SCAN = 1000
+DISPLAY_BISECTIONS = 48
+
+
+def parse_display(text):
+    """Read a displayed value as (number, unit): "1.5 kHz" is (1500.0, "hz").
+
+    Units are canonical (hz, s, db, %, st, ct, ratio, pan, fraction); an unknown
+    unit is kept as written and only matches itself. None when there is no
+    leading number at all.
+    """
+    if text is None:
+        return None
+    t = str(text).strip().lower().replace(u"−", "-")
+    if t in ("c", "center", "centre"):
+        return (0.0, "pan")
+    m = _PAN.match(t)
+    if m:
+        amount = float(m.group(1))
+        return (-amount if m.group(2) == "l" else amount, "pan")
+    m = _RATIO.match(t)
+    if m:
+        return (float(m.group(1)), "ratio")
+    m = _FRACTION.match(t)
+    if m and int(m.group(2)):
+        return (float(m.group(1)) / float(m.group(2)), "fraction")
+    m = _NUMBER_WITH_UNIT.match(t)
+    if not m:
+        return None
+    number, unit = float(m.group(1)), m.group(2).strip()
+    if unit in _UNITS:
+        canonical, scale = _UNITS[unit]
+        return (number * scale, canonical)
+    return (number, unit)
+
+
+def _units_compatible(wanted, shown):
+    return not wanted or not shown or wanted == shown
+
+
+def _display_error(achieved, goal):
+    if achieved == goal:
+        return 0.0
+    error = achieved - goal
+    if math.isnan(error) or math.isinf(error):
+        return None
+    return round(error, 6)
+
+
+# ── Meters ───────────────────────────────────────────────────────────────────
+
+# schedule_message counts in Live's display ticks, about 100 ms each, which is
+# the finest interval the meters can be sampled at without blocking Live.
+METER_TICK_SECONDS = 0.1
+MAX_METER_SECONDS = 30.0
+MAX_PROBE_SECONDS = 60.0
+# probe_entry thresholds, on Live's 0..1 meter scale.
+ENTRY_SILENT = 0.1
+ENTRY_LOUD = 0.3
+ENTRY_RISE = 0.15
 
 
 def create_instance(c_instance):
@@ -360,6 +454,9 @@ class AbletonMCP(ControlSurface):
                 "extended_notes": hasattr(song, "view"),
                 "arrangement_clip_creation": hasattr(first_track, "create_midi_clip"),
                 "take_lanes": hasattr(first_track, "take_lanes"),
+                "track_name_guard": True,
+                "display_values": True,
+                "meters": True,
             },
         }
 
@@ -417,6 +514,8 @@ class AbletonMCP(ControlSurface):
             "set_track_send": self._set_track_send,
             "get_track_routing": self._get_track_routing,
             "set_track_routing": self._set_track_routing,
+            "get_meters": self._get_meters,
+            "probe_entry": self._probe_entry,
             # clips
             "get_clip": self._get_clip,
             "create_clip": self._create_clip,
@@ -450,6 +549,7 @@ class AbletonMCP(ControlSurface):
             "delete_device": self._delete_device,
             "get_rack_chains": self._get_rack_chains,
             "set_chain_mixer": self._set_chain_mixer,
+            "get_simpler_sample": self._get_simpler_sample,
             # browser
             "search_browser": self._search_browser,
             "get_browser_tree": self._get_browser_tree,
@@ -479,8 +579,12 @@ class AbletonMCP(ControlSurface):
     def _resolve_track(self, params):
         song = self._song_ref
         track_type = (params.get("track_type") or "regular").lower()
+        expected = params.get("expect_track_name")
         if track_type == "master":
-            return song.master_track
+            track = song.master_track
+            if expected is not None:
+                self._check_track_name(track, expected, "master track", [])
+            return track
         collection = song.return_tracks if track_type == "return" else song.tracks
         index = int(params.get("track_index", 0))
         if not 0 <= index < len(collection):
@@ -488,7 +592,60 @@ class AbletonMCP(ControlSurface):
                 "%s track %d does not exist (there are %d)"
                 % (track_type, index, len(collection))
             )
-        return collection[index]
+        track = collection[index]
+        if expected is not None:
+            self._check_track_name(
+                track, expected, "%s track %d" % (track_type, index), collection,
+                is_return=track_type == "return")
+        return track
+
+    @staticmethod
+    def _require_index_for_guard(params):
+        if params.get("expect_track_name") is not None and params.get("track_index") is None:
+            raise ValueError("expect_track_name was given without track_index; "
+                             "pass the index the name was read at")
+
+    @staticmethod
+    def _bare_return_name(name):
+        # Live reports return tracks with their letter, "A-Reverb", while the
+        # user (and the agent) often know them as plain "Reverb".
+        head, sep, rest = name.partition("-")
+        if sep and 1 <= len(head) <= 2 and head.isalpha() and head.isupper():
+            return rest
+        return name
+
+    @classmethod
+    def _track_name_matches(cls, actual, expected, is_return=False):
+        actual = (actual or "").strip()
+        expected = (expected or "").strip()
+        if actual == expected:
+            return True
+        if is_return:
+            return cls._bare_return_name(actual).strip() == cls._bare_return_name(expected).strip()
+        return False
+
+    def _check_track_name(self, track, expected, where, collection, is_return=False):
+        """Refuse when the track at an index is no longer the one the caller read.
+
+        Handlers run on Live's main thread, so this check and the write that
+        follows it cannot be split by a user edit.
+        """
+        actual = self._get(track, "name", "")
+        if self._track_name_matches(actual, expected, is_return):
+            return
+        expected = str(expected).strip()
+        found = [i for i, t in enumerate(collection)
+                 if self._track_name_matches(self._get(t, "name", ""), expected, is_return)]
+        if not found:
+            moved = "%s is not in the set" % expected
+        elif len(found) == 1:
+            moved = "%s is now at index %d" % (expected, found[0])
+        else:
+            moved = "%s is now at indices %s" % (expected, ", ".join(str(i) for i in found))
+        raise ValueError(
+            '%s is "%s", expected "%s"; the set changed (%s). Re-read with get_tracks.'
+            % (where, actual, expected, moved)
+        )
 
     def _resolve_clip(self, params):
         track = self._resolve_track(params)
@@ -964,16 +1121,18 @@ class AbletonMCP(ControlSurface):
         return {"view": params["view"]}
 
     def _set_selection(self, params, respond):
+        self._require_index_for_guard(params)
         song = self._song_ref
         view = song.view
         selected = {}
 
         if params.get("track_index") is not None:
-            index = int(params["track_index"])
-            if not 0 <= index < len(song.tracks):
-                raise IndexError("track %d does not exist" % index)
-            view.selected_track = song.tracks[index]
-            selected["track"] = song.tracks[index].name
+            track = self._resolve_track({
+                "track_index": params["track_index"],
+                "expect_track_name": params.get("expect_track_name"),
+            })
+            view.selected_track = track
+            selected["track"] = track.name
         if params.get("scene_index") is not None:
             index = int(params["scene_index"])
             if not 0 <= index < len(song.scenes):
@@ -1198,8 +1357,15 @@ class AbletonMCP(ControlSurface):
         mixer = track.mixer_device
         changed = []
 
+        if params.get("volume") is not None and params.get("volume_db") is not None:
+            raise ValueError("give volume or volume_db, not both")
+        volume_target = None
         if params.get("volume") is not None:
             mixer.volume.value = self._clamp_parameter(mixer.volume, params["volume"])
+            changed.append("volume")
+        if params.get("volume_db") is not None:
+            volume_target = self._set_by_display(
+                mixer.volume, "%s dB" % float(params["volume_db"]))
             changed.append("volume")
         if params.get("panning") is not None:
             mixer.panning.value = self._clamp_parameter(mixer.panning, params["panning"])
@@ -1224,17 +1390,139 @@ class AbletonMCP(ControlSurface):
                 MONITORING_STATE, params["monitoring_state"], "monitoring state")
             changed.append("monitoring_state")
 
-        return {
+        result = {
             "changed": [c for c in changed if c],
             "volume": mixer.volume.value,
             "volume_display": self._display_value(mixer.volume),
             "panning": mixer.panning.value,
         }
+        if volume_target is not None:
+            result["volume_target"] = volume_target["target"]
+            result["volume_error_db"] = volume_target.get("error")
+        return result
 
     @staticmethod
     def _clamp_parameter(parameter, value):
         """Keep writes inside the parameter's range, Live raises otherwise."""
         return max(parameter.min, min(parameter.max, float(value)))
+
+    def _value_for_display(self, parameter, wanted):
+        """Find the raw value Live displays as `wanted`, in one main-thread pass.
+
+        Quantized parameters match their named settings. Otherwise the display
+        is read through str_for_value: if it is monotonic across the range the
+        target is bisected, else the range is scanned for the closest value.
+        """
+        text = str(wanted).strip()
+        lo, hi = float(parameter.min), float(parameter.max)
+        quantized = bool(self._get(parameter, "is_quantized", False))
+        items = []
+        if quantized:
+            items = [str(i) for i in (self._get(parameter, "value_items") or [])]
+            for i, item in enumerate(items):
+                if item.strip().lower() == text.lower():
+                    return self._display_outcome(parameter, lo + i, text, None, "value_items")
+
+        target = parse_display(text)
+        if target is None:
+            if items:
+                raise ValueError("%r is not one of %s's settings: %s"
+                                 % (text, parameter.name, ", ".join(items)))
+            raise ValueError("could not read %r as a number with a unit, e.g. \"220 Hz\", "
+                             "\"-6 dB\", \"3 ms\", \"2:1\"" % text)
+        goal, unit = target
+
+        def measure(x):
+            try:
+                parsed = parse_display(parameter.str_for_value(x))
+            except Exception:
+                return None
+            if parsed is None or not _units_compatible(unit, parsed[1]):
+                return None
+            return parsed[0]
+
+        if quantized:
+            candidates = [lo + i for i in range(int(round(hi - lo)) + 1)]
+            return self._closest(parameter, measure, candidates, goal, text, "scan")
+
+        grid = [lo + (hi - lo) * i / float(DISPLAY_GRID) for i in range(DISPLAY_GRID + 1)]
+        points = [(x, measure(x)) for x in grid]
+        points = [(x, y) for x, y in points if y is not None and not math.isnan(y)]
+        if len(points) < 2:
+            raise ValueError("%s is shown as %r, which cannot be compared with %r"
+                             % (parameter.name, self._display_value(parameter), text))
+        steps = [b[1] - a[1] for a, b in zip(points, points[1:])]
+        steps = [d for d in steps if not math.isnan(d)]
+        rising = all(d >= 0 for d in steps)
+        falling = all(d <= 0 for d in steps)
+        if points[0][1] == points[-1][1] or not (rising or falling):
+            dense = [lo + (hi - lo) * i / float(DISPLAY_SCAN) for i in range(DISPLAY_SCAN + 1)]
+            return self._closest(parameter, measure, dense, goal, text, "scan")
+        value = self._bisect_display(measure, points, goal, rising)
+        return self._display_outcome(parameter, value, text, (goal, measure(value)), "bisection")
+
+    @staticmethod
+    def _bisect_display(measure, points, goal, rising):
+        sign = 1.0 if rising else -1.0
+        if math.isinf(goal):
+            lowest, highest = sorted([points[0], points[-1]], key=lambda p: p[1])
+            return lowest[0] if goal < 0 else highest[0]
+        if sign * (goal - points[0][1]) <= 0:
+            return points[0][0]
+        if sign * (goal - points[-1][1]) >= 0:
+            return points[-1][0]
+        lo, hi = points[0][0], points[-1][0]
+        for (xa, ya), (xb, yb) in zip(points, points[1:]):
+            if sign * (ya - goal) <= 0 <= sign * (yb - goal):
+                lo, hi = xa, xb
+                break
+        for _ in range(DISPLAY_BISECTIONS):
+            mid = (lo + hi) / 2.0
+            y = measure(mid)
+            if y is None:
+                break
+            if sign * (y - goal) < 0:
+                lo = mid
+            else:
+                hi = mid
+
+        def miss(x):
+            y = measure(x)
+            return float("inf") if y is None else abs(y - goal)
+
+        return lo if miss(lo) < miss(hi) else hi
+
+    def _closest(self, parameter, measure, candidates, goal, text, method):
+        best, best_miss = None, None
+        for x in candidates:
+            y = measure(x)
+            if y is None:
+                continue
+            miss = 0.0 if y == goal else abs(y - goal)
+            if best_miss is None or miss < best_miss:
+                best, best_miss = x, miss
+        if best is None:
+            raise ValueError("%s is shown as %r, which cannot be compared with %r"
+                             % (parameter.name, self._display_value(parameter), text))
+        return self._display_outcome(parameter, best, text, (goal, measure(best)), method)
+
+    def _display_outcome(self, parameter, value, text, numbers, method):
+        value = self._clamp_parameter(parameter, value)
+        try:
+            shown = parameter.str_for_value(value)
+        except Exception:
+            shown = None
+        outcome = {"value": value, "target": text, "achieved": shown, "method": method}
+        if numbers is not None and numbers[1] is not None:
+            outcome["error"] = _display_error(numbers[1], numbers[0])
+        return outcome
+
+    def _set_by_display(self, parameter, wanted):
+        """Set a parameter to the value Live displays as `wanted`."""
+        outcome = self._value_for_display(parameter, wanted)
+        parameter.value = outcome["value"]
+        outcome["value"] = parameter.value
+        return outcome
 
     def _set_track_send(self, params, respond):
         track = self._resolve_track(params)
@@ -1245,9 +1533,233 @@ class AbletonMCP(ControlSurface):
                 "send %d does not exist; this set has %d return track(s)"
                 % (index, len(sends))
             )
+        if params.get("value_db") is not None:
+            outcome = self._set_by_display(sends[index], "%s dB" % float(params["value_db"]))
+            return {"send_index": index, "value": sends[index].value,
+                    "display": outcome["achieved"], "target": outcome["target"],
+                    "error_db": outcome.get("error")}
+        if params.get("value") is None:
+            raise ValueError("give value or value_db")
         sends[index].value = self._clamp_parameter(sends[index], params["value"])
         return {"send_index": index, "value": sends[index].value,
                 "display": self._display_value(sends[index])}
+
+    # ── Meters ───────────────────────────────────────────────────────────────
+    # Sampling happens here, on the main thread, one pass over every meter per
+    # sample, spread across ticks with _defer so Live keeps running between
+    # samples. A loop in the server would pay a socket round trip and a
+    # scheduling tick per sample, and its timestamps would be the client's.
+
+    def _now(self):
+        return time.time()
+
+    def _meter_sources(self):
+        song = self._song_ref
+        sources = [("regular", i, t) for i, t in enumerate(song.tracks)]
+        sources += [("return", i, t) for i, t in enumerate(song.return_tracks)]
+        if song.master_track is not None:
+            sources.append(("master", 0, song.master_track))
+        return sources
+
+    def _read_meters(self, sources):
+        """Every meter in one main-thread pass, as (level, left, right) rows."""
+        return [
+            (self._get(track, "output_meter_level", 0.0, float) or 0.0,
+             self._get(track, "output_meter_left", 0.0, float) or 0.0,
+             self._get(track, "output_meter_right", 0.0, float) or 0.0)
+            for _, _, track in sources
+        ]
+
+    def _sample_meters(self, interval, keep_going, finish, fail):
+        """Sample every meter each `interval` seconds until keep_going says stop.
+
+        Samples are (wall time, song time, meter rows).
+        """
+        sources = self._meter_sources()
+        ticks = max(1, int(round(interval / METER_TICK_SECONDS)))
+        samples = []
+
+        def sample():
+            try:
+                samples.append((self._now(), self._song_ref.current_song_time,
+                                self._read_meters(sources)))
+                if keep_going(samples):
+                    self._defer(ticks, sample)
+                else:
+                    finish(sources, samples)
+            except Exception as e:
+                fail(e)
+
+        sample()
+
+    @staticmethod
+    def _meter_interval(params):
+        interval = float(params.get("interval") or METER_TICK_SECONDS)
+        if interval <= 0:
+            raise ValueError("interval must be positive")
+        return max(interval, METER_TICK_SECONDS)
+
+    def _meter_stats(self, sources, samples, column):
+        stats = []
+        for k, (kind, index, track) in enumerate(sources):
+            rows = [row[k] for _, _, row in samples]
+            levels = [r[0] for r in rows]
+            entry = {"type": kind, "index": index, "name": self._get(track, "name", "")}
+            if levels:
+                entry[column + "avg"] = round(sum(levels) / len(levels), 3)
+                entry[column + "peak"] = round(max(levels), 3)
+                if not column:
+                    entry["peak_left"] = round(max(r[1] for r in rows), 3)
+                    entry["peak_right"] = round(max(r[2] for r in rows), 3)
+            if kind == "regular" and self._get(track, "has_audio_output", True) is False:
+                entry["has_audio_output"] = False
+            stats.append(entry)
+        return stats
+
+    def _get_meters(self, params, respond):
+        duration = float(params.get("duration") or 2.0)
+        if not 0 < duration <= MAX_METER_SECONDS:
+            raise ValueError("duration must be between 0 and %d seconds" % MAX_METER_SECONDS)
+        interval = self._meter_interval(params)
+        if respond is None:
+            raise RuntimeError("get_meters samples over time and cannot run inside a batch")
+        song = self._song_ref
+        started = self._now()
+
+        def keep_going(samples):
+            return samples[-1][0] - started < duration
+
+        def finish(sources, samples):
+            times = [t for t, _, _ in samples]
+            gaps = [b - a for a, b in zip(times, times[1:])]
+            report = {
+                "samples": len(samples),
+                "seconds": round(times[-1] - times[0], 3),
+                "interval": round(sum(gaps) / len(gaps), 3) if gaps else None,
+                "song_time": {"start": samples[0][1], "end": samples[-1][1]},
+                "is_playing": bool(song.is_playing),
+                "tracks": self._meter_stats(sources, samples, ""),
+                "scale": "Live's meter scale, 0.0 to 1.0, not dBFS. The meters hold "
+                         "peaks briefly, so avg reads high.",
+            }
+            if not song.is_playing:
+                report["warning"] = ("the transport is stopped, so the meters show only "
+                                     "input monitoring and tails")
+            respond({"ok": report})
+
+        self._sample_meters(interval, keep_going, finish,
+                            lambda e: respond({"error": str(e)}))
+        return DEFERRED
+
+    def _probe_entry(self, params, respond):
+        """Play across `beat` and report which tracks get louder there."""
+        song = self._song_ref
+        beat = float(params["beat"])
+        preroll = float(params.get("preroll") or 5.0)
+        after = float(params.get("after") or 4.0)
+        if beat < 0 or preroll <= 0 or after <= 0:
+            raise ValueError("beat must not be negative; preroll and after must be positive")
+        interval = self._meter_interval(params)
+        if respond is None:
+            raise RuntimeError("probe_entry plays the set over time and cannot run inside "
+                               "a batch")
+        start = max(0.0, beat - preroll)
+        end = beat + after
+        # The meters still hold what was playing before the jump for a moment.
+        settle = min(1.0, (beat - start) / 2.0)
+        budget = min(MAX_PROBE_SECONDS, (end - start) * 60.0 / float(song.tempo) * 2.0 + 3.0)
+        original = song.current_song_time
+        was_playing = bool(song.is_playing)
+        state = {"ticks": 0}
+
+        def restore():
+            if not was_playing:
+                song.stop_playing()
+            song.current_song_time = original
+
+        def fail(e):
+            try:
+                restore()
+            finally:
+                respond({"error": str(e)})
+
+        def finish(sources, samples):
+            restore()
+            report = self._probe_report(sources, samples, beat, start + settle, end)
+            report["restored_to"] = original
+            if state.get("warning"):
+                report["warning"] = state["warning"]
+            respond({"ok": report})
+
+        def positioned():
+            state["ticks"] += 1
+            now = song.current_song_time
+            if not start - 1e-3 <= now < start + max(1.0, settle):
+                if state["ticks"] > MAX_DEFER_TICKS:
+                    fail(RuntimeError("Live would not move the playhead to beat %s" % start))
+                    return
+                self._defer(1, positioned)
+                return
+            if not song.is_playing:
+                song.continue_playing()
+            started = self._now()
+
+            def keep_going(samples):
+                now_wall, song_time, _ = samples[-1]
+                if song_time >= end:
+                    return False
+                if now_wall - started > budget:
+                    state["warning"] = "stopped after %.1f s before reaching beat %s" % (
+                        budget, end)
+                    return False
+                if len(samples) > 3 and not song.is_playing:
+                    state["warning"] = "playback stopped during the probe"
+                    return False
+                return True
+
+            self._sample_meters(interval, keep_going, finish, fail)
+
+        song.current_song_time = start
+        self._defer(1, positioned)
+        return DEFERRED
+
+    def _probe_report(self, sources, samples, beat, before_from, end):
+        before = [s for s in samples if before_from <= s[1] < beat]
+        after = [s for s in samples if beat <= s[1] <= end + 0.5]
+        before_stats = self._meter_stats(sources, before, "before_")
+        after_stats = self._meter_stats(sources, after, "after_")
+        tracks, entered, rose, left = [], [], [], []
+        for b, a in zip(before_stats, after_stats):
+            entry = dict(b)
+            entry.update(a)
+            label = entry["name"] if entry["type"] == "regular" else (
+                "%s (%s)" % (entry["name"], entry["type"]))
+            if before and after:
+                entry["change"] = round(entry["after_avg"] - entry["before_avg"], 3)
+                if entry["before_peak"] < ENTRY_SILENT and entry["after_peak"] >= ENTRY_LOUD:
+                    entry["entered"] = True
+                    entered.append(label)
+                elif entry["change"] >= ENTRY_RISE:
+                    rose.append(label)
+                elif entry["after_peak"] < ENTRY_SILENT and entry["before_peak"] >= ENTRY_LOUD:
+                    left.append(label)
+            tracks.append(entry)
+        tracks.sort(key=lambda t: -t.get("change", 0.0))
+        report = {
+            "beat": beat,
+            "song_time": {"start": samples[0][1], "end": samples[-1][1]},
+            "samples": {"before": len(before), "after": len(after)},
+            "entered": entered,
+            "rose": rose,
+            "left": left,
+            "tracks": tracks,
+            "scale": "Live's meter scale, 0.0 to 1.0. Entered: peak under %.2f before and "
+                     "at least %.2f after. Rose: average up by %.2f or more."
+                     % (ENTRY_SILENT, ENTRY_LOUD, ENTRY_RISE),
+        }
+        if not before:
+            report["warning"] = "no samples before the beat; increase preroll"
+        return report
 
     def _get_track_routing(self, params, respond):
         track = self._resolve_track(params)
@@ -1434,7 +1946,10 @@ class AbletonMCP(ControlSurface):
         if params.get("target_track_index") is not None:
             target_params = dict(params)
             target_params["track_index"] = int(params["target_track_index"])
+            target_params["expect_track_name"] = params.get("expect_target_track_name")
             target_track = self._resolve_track(target_params)
+        elif params.get("expect_target_track_name") is not None:
+            self._resolve_track(dict(params, expect_track_name=params["expect_target_track_name"]))
 
         target = self._resolve_slot(target_track, int(params["target_clip_index"]))
         if target.has_clip:
@@ -1553,9 +2068,8 @@ class AbletonMCP(ControlSurface):
 
         envelope = clip.automation_envelope(parameter)
         if envelope is None:
-            # An Arrangement copy of an automated Session clip keeps its
-            # envelopes only when the track has no devices (Live 12.4.6), but `automation_envelope(parameter)` will not
-            # resolve them, the parameter object belongs to the track, not the
+            # An Arrangement copy can hold clip envelopes, but
+            # `automation_envelope(parameter)` will not resolve them, the parameter object belongs to the track, not the
             # placed copy. They are still reachable by walking the clip's own
             # envelope collection.
             envelope = self._envelope_from_collection(clip, parameter)
@@ -1581,8 +2095,8 @@ class AbletonMCP(ControlSurface):
             raise RuntimeError(
                 "Live will not create a new automation envelope on an Arrangement clip, "
                 "and %r has none for %r yet. Write the envelope on the Session clip "
-                "first and then use duplicate_clip_to_arrangement. The copies keep it "
-                "only on a track with no devices, and can then be rewritten in place."
+                "first and then use duplicate_clip_to_arrangement, which carries it into "
+                "the Arrangement."
                 % (clip.name, parameter.name)
             )
 
@@ -2405,6 +2919,7 @@ class AbletonMCP(ControlSurface):
             "default_value": self._get(parameter, "default_value"),
             "is_quantized": self._get(parameter, "is_quantized", False),
             "is_enabled": self._get(parameter, "is_enabled", True),
+            "automation_state": self._get(parameter, "automation_state", 0),
         }
         if info["is_quantized"]:
             items = self._get(parameter, "value_items")
@@ -2432,14 +2947,28 @@ class AbletonMCP(ControlSurface):
         if params.get("parameter_index") is None and not params.get("parameter_name"):
             raise ValueError("give either parameter_index or parameter_name")
         previous = parameter.value
-        parameter.value = self._clamp_parameter(parameter, params["value"])
-        return {
+        outcome = None
+        if params.get("display") is not None:
+            if params.get("value") is not None:
+                raise ValueError("give value or display, not both")
+            outcome = self._set_by_display(parameter, params["display"])
+        elif params.get("value") is not None:
+            parameter.value = self._clamp_parameter(parameter, params["value"])
+        else:
+            raise ValueError("give either value or display")
+        result = {
             "device": device.name if device else "mixer",
             "parameter": parameter.name,
             "from": previous,
             "to": parameter.value,
             "display": self._display_value(parameter),
         }
+        if outcome is not None:
+            result["target"] = outcome["target"]
+            result["method"] = outcome["method"]
+            if "error" in outcome:
+                result["error"] = outcome["error"]
+        return result
 
     def _set_device_parameters(self, params, respond):
         device = self._resolve_device(params)
@@ -2447,8 +2976,10 @@ class AbletonMCP(ControlSurface):
         applied, failed = [], []
 
         for i, entry in enumerate(params.get("values") or []):
-            if not isinstance(entry, dict) or "value" not in entry:
-                failed.append({"at": i, "error": "each entry needs a value and a name or index"})
+            if not isinstance(entry, dict) or (entry.get("value") is None
+                                               and entry.get("display") is None):
+                failed.append({"at": i, "error": "each entry needs a value or display, "
+                                                 "and a name or index"})
                 continue
             try:
                 if entry.get("name") is not None:
@@ -2460,6 +2991,13 @@ class AbletonMCP(ControlSurface):
                     if not 0 <= index < len(device.parameters):
                         raise IndexError("parameter %d does not exist" % index)
                     parameter = device.parameters[index]
+                if entry.get("display") is not None:
+                    outcome = self._set_by_display(parameter, entry["display"])
+                    applied.append({"name": parameter.name, "value": parameter.value,
+                                    "display": outcome["achieved"],
+                                    "target": outcome["target"],
+                                    "error": outcome.get("error")})
+                    continue
                 parameter.value = self._clamp_parameter(parameter, entry["value"])
                 applied.append({"name": parameter.name, "value": parameter.value,
                                 "display": self._display_value(parameter)})
@@ -2546,6 +3084,33 @@ class AbletonMCP(ControlSurface):
             changed.append("panning")
 
         return {"chain": chain.name, "changed": [c for c in changed if c]}
+
+    def _get_simpler_sample(self, params, respond):
+        """Where a Simpler's sample lives, for analyze_sample to read the file."""
+        device = self._resolve_device(params)
+        class_name = self._get(device, "class_name")
+        if not hasattr(device, "sample"):
+            raise ValueError("%r is a %s, not a Simpler" % (device.name, class_name))
+        sample = self._get(device, "sample")
+        if sample is None:
+            raise ValueError("Simpler %r has no sample loaded" % device.name)
+        path = self._get(sample, "file_path")
+        if not path:
+            raise ValueError("Live does not report a file for %r's sample" % device.name)
+        info = {
+            "device": device.name,
+            "class_name": class_name,
+            "file_path": path,
+            "sample_rate": self._get(sample, "sample_rate"),
+            "length": self._get(sample, "length"),
+            "start_marker": self._get(sample, "start_marker"),
+            "end_marker": self._get(sample, "end_marker"),
+            "warping": self._get(sample, "warping"),
+        }
+        for parameter in device.parameters:
+            if parameter.name in ("Transpose", "Detune"):
+                info[parameter.name.lower()] = parameter.value
+        return info
 
     # ── Browser ──────────────────────────────────────────────────────────────
 
@@ -2758,6 +3323,7 @@ class AbletonMCP(ControlSurface):
         rack = self._load_browser_item(
             {"track_index": params.get("track_index"),
              "track_type": params.get("track_type"),
+             "expect_track_name": params.get("expect_track_name"),
              "uri": params["rack_uri"]}, None)
 
         listing = self._get_browser_items_at_path({"path": params["kit_path"]}, None)
@@ -2768,6 +3334,7 @@ class AbletonMCP(ControlSurface):
         kit = self._load_browser_item(
             {"track_index": params.get("track_index"),
              "track_type": params.get("track_type"),
+             "expect_track_name": params.get("expect_track_name"),
              "uri": loadable[0]["uri"]}, None)
         return {"rack": rack["loaded"], "kit": kit["loaded"], "track": kit["track"]}
 
@@ -2820,8 +3387,15 @@ class AbletonMCP(ControlSurface):
             missing = [c["clip_index"] for c in copies
                        if c["clip_index"] is None
                        or not self._clip_has_envelope(clips[c["clip_index"]], parameter)]
+            if not missing:
+                via = "clip"
+            elif self._get(parameter, "automation_state", 0):
+                via = "track_lane"
+            else:
+                via = None
             envelopes.append({"device": device, "parameter": parameter.name,
-                              "carried": not missing, "missing_on": missing})
+                              "carried": via is not None, "via": via,
+                              "missing_on": [] if via else missing})
         result = {
             "clip": source.name,
             "track": track.name,
@@ -2830,12 +3404,21 @@ class AbletonMCP(ControlSurface):
             "copies": copies,
             "envelopes": envelopes,
         }
+        lane = ["%s %s" % (e["device"], e["parameter"]) for e in envelopes
+                if e["via"] == "track_lane"]
         lost = ["%s %s" % (e["device"], e["parameter"]) for e in envelopes if not e["carried"]]
+        notes = []
+        if lane:
+            notes.append("The automation for %s now lives on the track's Arrangement "
+                         "automation lane, not on the copies, and the API cannot read or "
+                         "edit it. To change it, rewrite the Session clip envelope and copy "
+                         "again (copying over the same range is expected to replace it; "
+                         "untested)." % ", ".join(lane))
         if lost:
-            result["note"] = ("Live did not carry these envelopes onto every copy: %s. "
-                              "Live strips clip envelopes from Arrangement copies "
-                              "when the track holds any device."
-                              % ", ".join(lost))
+            notes.append("Live did not carry these envelopes onto the copies, as clip "
+                         "envelopes or track automation: %s." % ", ".join(lost))
+        if notes:
+            result["note"] = " ".join(notes)
         return result
 
     def _clip_has_envelope(self, clip, parameter):
@@ -3223,6 +3806,7 @@ class AbletonMCP(ControlSurface):
 
     def _clear_arrangement(self, params, respond):
         song = self._song_ref
+        self._require_index_for_guard(params)
         if params.get("track_index") is not None:
             tracks = [self._resolve_track(params)]
         else:
@@ -3274,6 +3858,11 @@ class AbletonMCP(ControlSurface):
         tick, so the toggle waits for the playhead to actually arrive rather
         than assuming it has. Toggling early creates a stray locator at the old
         position and then fails to find the intended one.
+
+        CuePoint.time is read-only and a moving playhead never sits on the
+        target, so while the transport plays it is stopped for the few ticks
+        the toggle takes, then the old position is restored and playback
+        continued (a brief audible gap, reported as interrupted_playback).
         """
         song = self._song_ref
         name = str(params.get("name") or "")
@@ -3294,14 +3883,22 @@ class AbletonMCP(ControlSurface):
 
         original_time = song.current_song_time
         was_playing = song.is_playing
+        if was_playing:
+            song.stop_playing()
         song.current_song_time = target
 
         state = {"ticks": 0}
+
+        def restore():
+            song.current_song_time = original_time
+            if was_playing:
+                song.continue_playing()
 
         def toggle():
             state["ticks"] += 1
             if abs(song.current_song_time - target) > 1e-3:
                 if state["ticks"] > MAX_DEFER_TICKS:
+                    restore()
                     respond({"error": "Live would not move the playhead to beat %s" % target})
                     return
                 self._defer(1, toggle)
@@ -3310,16 +3907,16 @@ class AbletonMCP(ControlSurface):
             try:
                 song.set_or_delete_cue()
                 cue = self._find_cue(target)
+                if cue is not None and name:
+                    cue.name = name
+                restore()
                 if cue is None:
                     respond({"error": "Live did not create a locator at beat %s" % target})
                     return
-                if name:
-                    cue.name = name
-                # Only restore the playhead when the transport is stopped;
-                # moving it mid-playback would audibly jump the set.
-                if not was_playing:
-                    song.current_song_time = original_time
-                respond({"ok": {"name": cue.name, "time": cue.time, "created": True}})
+                result = {"name": cue.name, "time": cue.time, "created": True}
+                if was_playing:
+                    result["interrupted_playback"] = True
+                respond({"ok": result})
             except Exception as e:
                 respond({"error": str(e)})
 
