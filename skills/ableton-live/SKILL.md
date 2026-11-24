@@ -92,8 +92,11 @@ You cannot hear the set, but you can measure it:
   and Detune that tune it to the set's root or fifth. Reach for it first when a
   kick or bass "sounds out of tune" or a low end beats.
 - `get_meters` (while playing) gives each track's average and peak level;
-  `probe_entry(beat)` plays across a beat and names the tracks that enter
-  there. It starts playback, so the user hears it; say so. Neither runs in
+  `probe_entry(beat)` plays across a beat and names the tracks that enter,
+  rise, dip (a dropout of a beat or more) or leave there, with a per-beat
+  trace to check them against. Make `preroll` and `after` span a whole
+  pattern for sparse parts, and an `after` longer than a dropout so it reads
+  as a dip rather than left. It starts playback, so the user hears it; say so. Neither runs in
   `batch`. Levels are Live's 0 to 1 meter scale, not dB: compare tracks.
 
 They report measurements, not opinions, and each carries a caveat about what it

@@ -1806,6 +1806,117 @@ class MeterTests(unittest.TestCase):
         self.assertEqual(report["restored_to"], 40.0)
 
 
+class HoldingMeterTrack(FakeTrack):
+    """A meter like Live's: it catches every peak since the last read and falls
+    at `fall` per second, so short events smear across the following samples."""
+
+    def __init__(self, name, signal, live, fall=1.0):
+        FakeTrack.__init__(self, name)
+        self.signal = signal
+        self.live = live
+        self.fall = fall
+        self.value = 0.0
+        self.read_at = None
+
+    @property
+    def output_meter_level(self):
+        song_time, clock = self.live.song.current_song_time, self.live.clock
+        if self.read_at is None:
+            span = [song_time]
+            elapsed = 0.0
+        else:
+            last_song, last_clock = self.read_at
+            elapsed = clock - last_clock
+            span = [song_time]
+            if self.live.song.is_playing and song_time > last_song:
+                steps = int((song_time - last_song) / 0.01)
+                span = [last_song + 0.01 * (i + 1) for i in range(steps)] + [song_time]
+        self.read_at = (song_time, clock)
+        self.value = max([self.value - self.fall * elapsed] +
+                         [self.signal(s) for s in span])
+        return self.value
+
+    @property
+    def output_meter_left(self):
+        return self.value
+
+    @property
+    def output_meter_right(self):
+        return self.value
+
+
+class ProbeMeterDecayTests(unittest.TestCase):
+    """Issue #3, as measured in Live 12.4.6 at 120 bpm around bar 70 (beat 276)."""
+
+    def probe(self, signals, params, playing_from=None, primed=None):
+        live = LiveSetScript([])
+        live.song.tempo = 120.0
+        live.song.drift = 0.2  # a tenth of a second at 120 bpm
+        live.song.tracks = [HoldingMeterTrack(name, signal, live)
+                            for name, signal in signals]
+        if playing_from is not None:
+            live.song.is_playing = True
+            live.song._time = playing_from
+        for track in live.song.tracks:
+            track.value = (primed or {}).get(track.name, 0.0)
+        responses = []
+        result = live.probe_entry(dict({"beat": 276.0}, **params), responses.append)
+        return live.settle(result, responses, ticks=200)
+
+    def track(self, report, name):
+        return next(t for t in report["tracks"] if t["name"] == name)
+
+    def test_a_meter_still_falling_from_before_the_jump_is_not_a_track_leaving(self):
+        # The kick fades out by bar 68, but the meter still holds what it played
+        # before the jump when the probe starts.
+        report = self.probe([("Kick", lambda t: 0.9 if t < 268 else 0.0),
+                             ("Bass", lambda t: 0.5)],
+                            {"preroll": 5}, playing_from=260.0, primed={"Kick": 0.9})
+        kick = self.track(report, "Kick")
+        self.assertGreaterEqual(kick["before_peak"], mcp.ENTRY_LOUD)  # what fooled the old rule
+        self.assertEqual(report["left"], [])
+        self.assertEqual(report["entered"] + report["rose"] + report["dipped"], [])
+
+    def test_a_one_bar_dropout_reads_as_a_dip(self):
+        clicks = lambda t: 0.0 if 276 <= t < 280 else (0.55 if (t * 2) % 1 < 0.1 else 0.4)
+        report = self.probe([("Clicks", clicks), ("Bass", lambda t: 0.5)],
+                            {"preroll": 5, "after": 6})
+        entry = self.track(report, "Clicks")
+        self.assertGreater(entry["before_min"], 0.3)
+        self.assertLess(entry["after_min"], 0.05)
+        self.assertEqual(report["dipped"], ["Clicks"])
+        self.assertGreaterEqual(entry["dip_beats"], 2)
+        self.assertEqual(report["left"], [])
+        beats = report["trace_beats"]
+        self.assertLess(entry["trace_peak"][beats.index(278)], 0.05)
+        self.assertGreater(entry["trace_peak"][beats.index(281)], 0.3)
+
+    def test_a_single_sparse_hit_is_not_a_rise(self):
+        snap = lambda t: 0.85 if 277.0 <= t < 277.05 else 0.0
+        report = self.probe([("Snap", snap), ("Bass", lambda t: 0.5)], {"preroll": 5})
+        entry = self.track(report, "Snap")
+        self.assertGreaterEqual(entry["after_peak"], 0.8)
+        self.assertGreaterEqual(entry["change"], mcp.ENTRY_RISE)  # what fooled the old rule
+        self.assertEqual(report["rose"] + report["entered"], [])
+
+    def test_a_real_entry_and_exit_still_register(self):
+        report = self.probe([("Lead", lambda t: 0.6 if t >= 276 else 0.0),
+                             ("Pad", lambda t: 0.6 if t < 276 else 0.0),
+                             ("Snap", lambda t: 0.7 if t >= 276 and (t % 1) < 0.1 else 0.0)],
+                            {"preroll": 5, "after": 6})
+        self.assertEqual(report["entered"], ["Lead", "Snap"])
+        self.assertEqual(report["left"], ["Pad"])
+
+    def test_thresholds_and_windows_can_be_tuned(self):
+        snap = lambda t: 0.85 if 277.0 <= t < 277.05 else 0.0
+        report = self.probe([("Snap", snap)], {"preroll": 5, "persist": 0, "decay": 0.1})
+        self.assertEqual(report["entered"], ["Snap"])
+        self.assertEqual(report["options"]["persist"], 0)
+        live = LiveSetScript([])
+        live.song.tempo = 120.0
+        with self.assertRaises(ValueError):
+            live.probe_entry({"beat": 8, "silent": 0.5, "loud": 0.4}, lambda r: None)
+
 # ── Simpler samples ──────────────────────────────────────────────────────────
 
 

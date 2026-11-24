@@ -117,8 +117,13 @@ display Live settled on and the error. `set_track_mixer` takes `volume_db` and
   by hand: a crate like `hound` reads WAV only, and AIFF would need hand-rolling
   anyway.
 - `get_meters` samples every track's output meter for a few seconds and
-  returns average and peak per track. `probe_entry` plays across a beat and
-  flags the tracks that enter there. Both sample inside the Remote Script, one
+  returns min, average and peak per track. `probe_entry` plays across a beat
+  and reports each track's before and after min, average and peak plus a
+  per-beat trace, flagging tracks that enter, rise, dip or leave. Because the
+  meters hold peaks and fall slowly, a change only counts when it lasts a beat
+  beyond the meter's decay (one sparse hit is not an entry), "left" is judged
+  from half a second after the beat, and a dropout is found from minimums
+  rather than averages. The thresholds and windows are arguments. Both sample inside the Remote Script, one
   pass over every meter per Live tick (about 100 ms), spread across ticks so
   Live is never blocked. Levels are Live's 0 to 1 meter scale, not dBFS, and the
   meters hold peaks, so averages read high.
