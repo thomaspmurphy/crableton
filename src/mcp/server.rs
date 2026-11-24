@@ -46,6 +46,72 @@ fn is_analysis(command: &str) -> bool {
     )
 }
 
+/// The script feature that makes it honour the arguments in [`GUARD_ARGS`].
+const GUARD_FEATURE: &str = "track_name_guard";
+const GUARD_ARGS: &[&str] = &["expect_track_name", "expect_target_track_name"];
+
+/// The first track-name guard a call carries, directly or in a batch step.
+fn guard_carried(params: &Value) -> Option<&'static str> {
+    let carried = |p: &Value| {
+        GUARD_ARGS
+            .iter()
+            .copied()
+            .find(|k| p.get(k).is_some_and(|v| !v.is_null()))
+    };
+    carried(params).or_else(|| {
+        params
+            .get("commands")?
+            .as_array()?
+            .iter()
+            .find_map(|c| carried(c.get("params")?))
+    })
+}
+
+/// Why a guarded call must not be sent. An older script would ignore the guard
+/// and run the write unchecked, which is the mistake the guard exists to
+/// prevent.
+fn guard_refusal(params: &Value, supported: bool) -> Option<String> {
+    if supported {
+        return None;
+    }
+    let arg = guard_carried(params)?;
+    Some(format!(
+        "the Remote Script running in Live does not check `{arg}`, so the call was not \
+         sent. Run `crableton install` and restart Ableton Live to update it, or retry \
+         without the guard."
+    ))
+}
+
+/// The script feature that understands the arguments in [`DISPLAY_ARGS`].
+const DISPLAY_FEATURE: &str = "display_values";
+const DISPLAY_ARGS: &[&str] = &["display", "volume_db", "value_db"];
+
+/// The first set-by-display argument a call carries, directly, in a
+/// `set_device_parameters` entry, or in a batch step. An older script would
+/// ignore it and fail on the missing `value`, or worse, apply the raw value.
+fn display_carried(params: &Value) -> Option<&'static str> {
+    let carried = |p: &Value| {
+        DISPLAY_ARGS
+            .iter()
+            .copied()
+            .find(|k| p.get(k).is_some_and(|v| !v.is_null()))
+            .or_else(|| {
+                p.get("values")?
+                    .as_array()?
+                    .iter()
+                    .any(|e| e.get("display").is_some_and(|v| !v.is_null()))
+                    .then_some("display")
+            })
+    };
+    carried(params).or_else(|| {
+        params
+            .get("commands")?
+            .as_array()?
+            .iter()
+            .find_map(|c| carried(c.get("params")?))
+    })
+}
+
 /// Commands that never reach Live, and so cannot be part of a batch.
 fn is_local(command: &str) -> bool {
     command.starts_with("__local_")
@@ -160,6 +226,80 @@ impl AbletonServer {
         CallToolResult::success(vec![ContentBlock::text(render(&answer))])
     }
 
+    /// Resolve the sample (a Simpler's file, or a path), analyse the file here
+    /// rather than in Live, and add the tuning that fits the set's key.
+    async fn analyze_sample(&self, params: &Value) -> Result<Value, Error> {
+        use crate::analysis::sample;
+
+        let bad = |reason: &str| Error::BadArguments {
+            tool: "analyze_sample".to_string(),
+            reason: reason.to_string(),
+        };
+        let mut source = Value::Null;
+        let path = match params.get("path").and_then(Value::as_str) {
+            Some(path) => {
+                if params.get("track_index").is_some_and(|v| !v.is_null()) {
+                    return Err(bad("pass either `path` or `track_index` + `device_index`, not both"));
+                }
+                expand_home(path)
+            }
+            None => {
+                if params.get("device_index").is_none_or(Value::is_null)
+                    || (params.get("track_index").is_none_or(Value::is_null)
+                        && params.get("track_type").and_then(Value::as_str) != Some("master"))
+                {
+                    return Err(bad("pass `track_index` and `device_index` of a Simpler, or a `path`"));
+                }
+                if !self.live.has_capability("get_simpler_sample").await {
+                    return Err(Error::Live(
+                        "the Remote Script running in Live cannot report a Simpler's sample. \
+                         Run `crableton install` and reload the Remote Script."
+                            .to_string(),
+                    ));
+                }
+                source = self.live.send("get_simpler_sample", params.clone()).await?;
+                source
+                    .get("file_path")
+                    .and_then(Value::as_str)
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| Error::Live("Live did not report the sample's file path".into()))?
+                    .to_string()
+            }
+        };
+
+        let file = path.clone();
+        let (mut report, body_hz) = tokio::task::spawn_blocking(move || {
+            let bytes = std::fs::read(&file).map_err(|e| format!("could not read {file}: {e}"))?;
+            sample::decode(&bytes).map(|audio| sample::analyze(&audio))
+        })
+        .await
+        .map_err(|e| Error::Protocol(format!("sample analysis panicked: {e}")))?
+        .map_err(Error::Live)?;
+
+        // The key comes from the set unless the caller named a root, so a file
+        // can be analysed with Live closed.
+        let (root, scale) = match params.get("root_note").and_then(Value::as_i64) {
+            Some(root) => (Some(root.rem_euclid(12) as u8), None),
+            None => match self.live.send("get_session_info", Value::Null).await {
+                Ok(info) => (
+                    info.pointer("/scale/root_note").and_then(Value::as_u64).map(|r| r as u8),
+                    info.pointer("/scale/name").and_then(Value::as_str).map(str::to_string),
+                ),
+                Err(_) => (None, None),
+            },
+        };
+        report["tuning"] = match (body_hz, root) {
+            (Some(hz), Some(root)) => sample::tuning(hz, root, scale.as_deref()),
+            (None, _) => json!("no stable pitch, so no tuning to suggest"),
+            (_, None) => json!("the set's root note is unknown; pass `root_note`"),
+        };
+        report["path"] = json!(path);
+        if !source.is_null() {
+            report["simpler"] = source;
+        }
+        Ok(report)
+    }
+
     async fn run_tool(&self, tool: &ToolDef, args: Option<&Map<String, Value>>) -> CallToolResult {
         let mut params = match tool.build_params(args) {
             Ok(params) => params,
@@ -193,6 +333,13 @@ impl AbletonServer {
             return self.run_analysis(tool.command, &params).await;
         }
 
+        if tool.command == crate::tools::analysis::SAMPLE {
+            return match self.analyze_sample(&params).await {
+                Ok(answer) => CallToolResult::success(vec![ContentBlock::text(render(&answer))]),
+                Err(e) => tool_error(e),
+            };
+        }
+
         if tool.name == "batch"
             && let Err(reason) = self.expand_batch(&mut params)
         {
@@ -212,10 +359,40 @@ impl AbletonServer {
             )));
         }
 
+        if guard_carried(&params).is_some() {
+            let supported = match self.live.has_feature(GUARD_FEATURE).await {
+                Ok(supported) => supported,
+                Err(e) => return tool_error(e),
+            };
+            if let Some(reason) = guard_refusal(&params, supported) {
+                return tool_error(Error::Live(reason));
+            }
+        }
+
+        if let Some(arg) = display_carried(&params) {
+            match self.live.has_feature(DISPLAY_FEATURE).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return tool_error(Error::Live(format!(
+                        "the Remote Script running in Live does not understand `{arg}`. Run \
+                         `crableton install` and reload the Remote Script, or pass a raw value."
+                    )));
+                }
+                Err(e) => return tool_error(e),
+            }
+        }
+
         match self.live.send(tool.command, params).await {
             Ok(result) => CallToolResult::success(vec![ContentBlock::text(render(&result))]),
             Err(e) => tool_error(e),
         }
+    }
+}
+
+fn expand_home(path: &str) -> String {
+    match (path.strip_prefix("~/"), dirs::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
+        _ => path.to_string(),
     }
 }
 
@@ -350,6 +527,72 @@ mod tests {
                 "should have rejected {bad}"
             );
         }
+    }
+
+    #[test]
+    fn guarded_calls_are_refused_when_the_script_lacks_the_feature() {
+        let single = json!({ "track_index": 3, "expect_track_name": "Keys" });
+        let target = json!({ "track_index": 0, "expect_target_track_name": "Bass" });
+        let batch = json!({ "commands": [
+            { "type": "set_tempo", "params": { "tempo": 120 } },
+            { "type": "set_track_name", "params": { "track_index": 1, "expect_track_name": "Vox" } }
+        ] });
+        for guarded in [&single, &target, &batch] {
+            let reason = guard_refusal(guarded, false).expect("should refuse");
+            assert!(reason.contains("crableton install"), "{reason}");
+            assert_eq!(guard_refusal(guarded, true), None);
+        }
+        assert!(guard_refusal(&target, false).unwrap().contains("expect_target_track_name"));
+
+        for unguarded in [
+            json!({ "track_index": 3 }),
+            json!({ "track_index": 3, "expect_track_name": null }),
+            json!({ "commands": [{ "type": "set_tempo", "params": { "tempo": 120 } }] }),
+        ] {
+            assert_eq!(guard_refusal(&unguarded, false), None, "{unguarded}");
+        }
+    }
+
+    #[test]
+    fn display_targets_are_detected_wherever_they_are_passed() {
+        for carried in [
+            json!({ "parameter_name": "Freq", "display": "220 Hz" }),
+            json!({ "values": [{ "name": "Freq", "value": 0.5 }, { "name": "Q", "display": "2" }] }),
+            json!({ "volume_db": -6.0 }),
+            json!({ "send_index": 0, "value_db": -12.0 }),
+            json!({ "commands": [{ "type": "set_track_mixer", "params": { "volume_db": -3.0 } }] }),
+        ] {
+            assert!(display_carried(&carried).is_some(), "{carried}");
+        }
+        for plain in [
+            json!({ "value": 0.5, "display": null }),
+            json!({ "values": [{ "name": "Freq", "value": 0.5 }] }),
+        ] {
+            assert_eq!(display_carried(&plain), None, "{plain}");
+        }
+    }
+
+    #[test]
+    fn set_device_parameter_takes_a_display_target_without_a_value() {
+        let registry = ToolRegistry::new(crate::tools::all());
+        let tool = registry.get("set_device_parameter").unwrap();
+        let args = json!({ "track_index": 0, "device_index": 1, "parameter_name": "Frequency",
+                           "display": "1.5 kHz" });
+        let params = tool.build_params(args.as_object()).unwrap();
+        assert_eq!(params["display"], "1.5 kHz");
+        assert!(params.get("value").is_none());
+    }
+
+    #[test]
+    fn batch_steps_keep_their_track_name_guard() {
+        let server = server();
+        let mut params = json!({ "steps": [{
+            "tool": "set_track_name",
+            "arguments": { "track_index": 1, "expect_track_name": "Vox", "name": "Lead" }
+        }] });
+        server.expand_batch(&mut params).unwrap();
+        assert_eq!(params["commands"][0]["params"]["expect_track_name"], "Vox");
+        assert!(guard_refusal(&params, false).is_some());
     }
 
     #[test]

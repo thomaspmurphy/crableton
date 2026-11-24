@@ -100,7 +100,8 @@ fn every_registered_handler_is_implemented() {
 
 #[test]
 fn every_remote_handler_is_reachable_from_a_tool() {
-    let used: HashSet<&str> = tools::all().iter().map(|tool| tool.command).collect();
+    let mut used: HashSet<&str> = tools::all().iter().map(|tool| tool.command).collect();
+    used.extend(tools::analysis::REMOTE_HELPERS);
     let orphaned: Vec<_> = registered_handlers()
         .into_iter()
         .filter(|name| !used.contains(name.as_str()))
@@ -110,6 +111,14 @@ fn every_remote_handler_is_reachable_from_a_tool() {
         orphaned.is_empty(),
         "the Remote Script handles commands no tool can reach: {orphaned:#?}"
     );
+}
+
+#[test]
+fn helper_commands_used_by_local_tools_are_handled() {
+    let handlers = registered_handlers();
+    for helper in tools::analysis::REMOTE_HELPERS {
+        assert!(handlers.contains(*helper), "no Remote Script handler for `{helper}`");
+    }
 }
 
 #[test]

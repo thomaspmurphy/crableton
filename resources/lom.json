@@ -145,7 +145,10 @@
         { "name": "output_routing_channel", "type": "RoutingChannel", "access": "read/write", "description": "Channel within the output destination." },
         { "name": "available_input_routing_types", "type": "RoutingType list", "access": "read-only", "description": "What this track's input can be set to, given the set and the machine's hardware." },
         { "name": "available_output_routing_types", "type": "RoutingType list", "access": "read-only", "description": "What this track's output can be set to." },
-        { "name": "is_frozen", "type": "bool", "access": "read-only", "description": "Whether the track is frozen. Freezing cannot be triggered from the API." }
+        { "name": "is_frozen", "type": "bool", "access": "read-only", "description": "Whether the track is frozen. Freezing cannot be triggered from the API." },
+        { "name": "output_meter_level", "type": "float", "access": "read-only", "description": "Output meter, 0.0 to 1.0 on Live's meter scale (not dBFS). Behaves like a short peak-hold, so a mean over a window reads high. Sampled by `get_meters` and `probe_entry`." },
+        { "name": "output_meter_left", "type": "float", "access": "read-only", "description": "Left channel of the output meter, same scale." },
+        { "name": "output_meter_right", "type": "float", "access": "read-only", "description": "Right channel of the output meter, same scale." }
       ],
       "children": [
         { "name": "clip_slots", "type": "ClipSlot list", "description": "Session clip slots, one per scene." },
@@ -358,6 +361,34 @@
         { "name": "str_for_value(value)", "type": "string", "description": "Format a value the way Live displays it, e.g. \"2.5 kHz\" or \"-6.0 dB\". The only reliable way to know what a raw number means to the user." },
         { "name": "re_enable_automation()", "description": "Re-engage automation after the parameter was overridden." }
       ]
+    },
+    {
+      "name": "SimplerDevice",
+      "path": "live_set tracks N devices M",
+      "description": "Simpler. A Device with a loaded sample; its pitch controls are the parameters \"Transpose\" (semitones) and \"Detune\" (cents).",
+      "properties": [
+        { "name": "playback_mode", "type": "int", "access": "read/write", "description": "0 = Classic, 1 = One-Shot, 2 = Slicing." }
+      ],
+      "children": [
+        { "name": "sample", "type": "Sample", "description": "The loaded sample, or None when Simpler is empty." }
+      ],
+      "methods": []
+    },
+    {
+      "name": "Sample",
+      "path": "live_set tracks N devices M sample",
+      "description": "The sample loaded in a Simpler (Live 11+).",
+      "properties": [
+        { "name": "file_path", "type": "string", "access": "read-only", "description": "Absolute path of the sample file. `analyze_sample` reads it server-side." },
+        { "name": "length", "type": "int", "access": "read-only", "description": "Length in sample frames." },
+        { "name": "sample_rate", "type": "int", "access": "read-only", "description": "Sample rate in Hz." },
+        { "name": "start_marker", "type": "int", "access": "read/write", "description": "Playback start, in sample frames." },
+        { "name": "end_marker", "type": "int", "access": "read/write", "description": "Playback end, in sample frames." },
+        { "name": "gain", "type": "float", "access": "read/write", "description": "Sample gain, as a normalised value." },
+        { "name": "warping", "type": "bool", "access": "read/write", "description": "Whether the sample is warped." }
+      ],
+      "children": [],
+      "methods": []
     },
     {
       "name": "RackDevice",

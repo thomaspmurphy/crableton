@@ -78,6 +78,11 @@ pub fn tools() -> Vec<ToolDef> {
             "volume",
             "Fader position from 0.0 to 1.0, not decibels. 0.85 is unity (0 dB), 1.0 is +6 dB.",
         )
+        .opt_num(
+            "volume_db",
+            "Fader in decibels instead of `volume`, e.g. -6. Found with Live's own display, \
+             so it lands on what the fader shows.",
+        )
         .opt_num("panning", "-1.0 hard left, 0.0 centre, 1.0 hard right.")
         .opt_bool("mute", "Mute the track.")
         .opt_bool("solo", "Solo the track.")
@@ -96,7 +101,8 @@ pub fn tools() -> Vec<ToolDef> {
         )
         .track_ref()
         .int("send_index", "0-based index of the return track: 0 is Send A, 1 is Send B.")
-        .num("value", "Send amount from 0.0 (off) to 1.0."),
+        .opt_num("value", "Send amount from 0.0 (off) to 1.0.")
+        .opt_num("value_db", "Send level in decibels instead of `value`, e.g. -12."),
 
         ToolDef::new(
             "get_track_routing",

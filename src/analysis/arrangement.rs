@@ -165,7 +165,7 @@ pub fn analyze(snapshot: &Snapshot, min_section_bars: usize) -> Value {
         "tempo": snapshot.tempo,
         "time_signature": snapshot.time_signature(),
         "total_bars": total_bars,
-        "length_minutes": ((end_beat / snapshot.tempo.max(1.0)) * 100.0 / 60.0).round() / 100.0 * 60.0 / 60.0,
+        "length_minutes": ((end_beat / snapshot.tempo.max(1.0)) * 100.0).round() / 100.0,
         "track_count": snapshot.track_names.len(),
         "sections": section_values,
         "transitions": turns,
@@ -204,6 +204,16 @@ mod tests {
             mixer: Vec::new(),
             locators: Vec::new(),
         }
+    }
+
+    #[test]
+    fn length_minutes_is_beats_over_tempo() {
+        // 160 bars of 4/4 at 123 BPM: 640 beats / 123 = 5.20 minutes.
+        let mut snap = snapshot(vec![clip(0, 0.0, 640.0)], vec!["Pad"]);
+        snap.tempo = 123.0;
+        let result = analyze(&snap, 1);
+        assert_eq!(result["total_bars"], 160);
+        assert_eq!(result["length_minutes"], 5.2);
     }
 
     #[test]

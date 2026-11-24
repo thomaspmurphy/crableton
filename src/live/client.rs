@@ -272,6 +272,32 @@ impl LiveClient {
         }
     }
 
+    /// Whether the connected script sets `features.<name>`.
+    ///
+    /// A cached "no" is re-asked once, so a script updated while this process
+    /// runs is noticed. A script too old to answer `get_script_info` has no
+    /// features at all.
+    pub async fn has_feature(&self, name: &str) -> Result<bool> {
+        let on = |info: &Value| {
+            info.get("features")
+                .and_then(|f| f.get(name))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        };
+        if self.script_info.read().await.as_ref().is_some_and(on) {
+            return Ok(true);
+        }
+        match self.send_uncached("get_script_info", &Value::Null).await {
+            Ok(info) => {
+                let supported = on(&info);
+                *self.script_info.write().await = Some(info);
+                Ok(supported)
+            }
+            Err(Error::Live(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     // ── Browser cache ────────────────────────────────────────────────────────
 
     fn cache_key(command: &str, params: &Value) -> String {

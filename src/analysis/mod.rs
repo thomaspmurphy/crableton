@@ -9,6 +9,7 @@
 pub mod arrangement;
 pub mod harmony;
 pub mod mix;
+pub mod sample;
 
 use serde_json::{Value, json};
 

@@ -51,6 +51,8 @@ pub fn timeout_for(command: &str, default: Duration) -> Duration {
         "get_session_snapshot" => 45,
         // A batch is N commands in one main-thread pass.
         "batch" => 120,
+        // Sample meters across ticks for up to a minute.
+        "get_meters" | "probe_entry" => 90,
         _ => return default,
     };
     Duration::from_secs(secs).max(default)

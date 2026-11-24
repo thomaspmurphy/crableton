@@ -15,6 +15,15 @@ mod scene;
 mod song;
 mod track;
 
+/// What `expect_track_name` tells the model. Shared by the tools that declare
+/// `track_index` by hand, so every guard reads the same.
+pub(crate) const EXPECT_TRACK_NAME: &str =
+    "Guard against the set changing under you: the track's name as you last read it \
+     alongside `track_index`. If the track at that index now has another name (the user \
+     inserted, moved or deleted a track), the call fails before changing anything and says \
+     where the name went. Pass it on every write. Return tracks match with or without \
+     Live's letter prefix (\"Reverb\" or \"A-Reverb\").";
+
 /// Argument shapes shared across domains, so "which track" means exactly the
 /// same thing on a mixer call as on a device call.
 pub(crate) trait CommonArgs: Sized {
@@ -35,6 +44,7 @@ impl CommonArgs for ToolDef {
             )
             .choices(&["regular", "return", "master"])
             .default(json!("regular"))
+            .opt_text("expect_track_name", EXPECT_TRACK_NAME)
     }
 
     fn clip_ref(self) -> Self {
@@ -146,6 +156,49 @@ mod tests {
         }
         for group in &used {
             assert!(GROUPS.contains(group), "group `{group}` missing from GROUPS");
+        }
+    }
+
+    #[test]
+    fn every_tool_addressing_a_track_accepts_the_name_guard() {
+        for def in all() {
+            // Analysis tools read a snapshot crableton takes itself; they never
+            // write, so there is nothing to guard.
+            if def.group == "analysis" {
+                continue;
+            }
+            let declares = |name: &str| def.args.iter().any(|a| a.name == name);
+            if declares("track_index") {
+                assert!(declares("expect_track_name"), "`{}` lacks expect_track_name", def.name);
+            }
+            if declares("target_track_index") {
+                assert!(
+                    declares("expect_target_track_name"),
+                    "`{}` lacks expect_target_track_name",
+                    def.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clip_and_device_tools_forward_the_name_guard() {
+        let tools = all();
+        for (tool, args) in [
+            ("fire_clip", json!({ "track_index": 2, "clip_index": 0, "expect_track_name": "Keys" })),
+            (
+                "duplicate_clip",
+                json!({ "track_index": 2, "clip_index": 0, "target_track_index": 3,
+                        "target_clip_index": 1, "expect_track_name": "Keys",
+                        "expect_target_track_name": "Bass" }),
+            ),
+            ("delete_device", json!({ "track_index": 2, "device_index": 0, "expect_track_name": "Keys" })),
+        ] {
+            let def = tools.iter().find(|d| d.name == tool).expect(tool);
+            let params = def
+                .build_params(args.as_object())
+                .unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert_eq!(params["expect_track_name"], "Keys", "{tool}");
         }
     }
 

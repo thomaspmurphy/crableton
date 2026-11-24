@@ -154,6 +154,7 @@ pub fn tools() -> Vec<ToolDef> {
              Purely a view change, it edits nothing.",
         )
         .opt_int("track_index", "Track to select.")
+        .opt_text("expect_track_name", crate::tools::EXPECT_TRACK_NAME)
         .opt_int("scene_index", "Scene to select.")
         .opt_int("clip_index", "Clip slot to select on the selected track.")
         .opt_int("device_index", "Device to select on the selected track."),
