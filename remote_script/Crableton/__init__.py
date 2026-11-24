@@ -39,7 +39,7 @@ except ImportError:
 DEFAULT_PORT = 9878
 HOST = "127.0.0.1"
 
-SCRIPT_VERSION = "2.5.0"
+SCRIPT_VERSION = "2.6.0"
 PROTOCOL_VERSION = 2
 
 # Sentinel returned by handlers that will answer on a later tick.
@@ -209,10 +209,17 @@ ENTRY_LOUD = 0.3
 ENTRY_RISE = 0.15
 # A change must last this many beats to count, which rejects a single hit.
 ENTRY_PERSIST_BEATS = 1.0
-# A dip into silence this long, in a track that was never silent before, is a dropout.
+# A fall this long (in per-beat minimums) that recovers is a dropout.
 ENTRY_DIP_BEATS = 1.0
-# Roughly how long Live's output meters take to fall after a sound stops.
-METER_DECAY_SECONDS = 0.5
+# A dip is a fall of this fraction below the track's usual per-beat minimum. Live's
+# meters fall so slowly that 2-3 beat volume dropouts only took a ~0.8 track to
+# 0.40 and 0.61 (issue #3), never near silence; 0.35 would miss the second.
+ENTRY_DIP_DEPTH = 0.2
+# The meters lag, so a dip may show up to this many beats either side of the beat.
+ENTRY_LAG_BEATS = 2.0
+# Roughly how long Live's output meters take to fall from ~0.8 to ~0.1 after a
+# sound stops: issue #3's dropout traces fell about 0.3 per second.
+METER_DECAY_SECONDS = 2.0
 
 
 def create_instance(c_instance):
@@ -1611,6 +1618,48 @@ class AbletonMCP(ControlSurface):
             raise ValueError("interval must be positive")
         return max(interval, METER_TICK_SECONDS)
 
+    def _group_of(self, track, sources):
+        """(group name, its position in sources) for a grouped track, else None.
+
+        Live 12.4 reads 0 on the meters of tracks inside a group while the
+        group track meters their sum (issue #3).
+        """
+        if not self._get(track, "is_grouped", False):
+            return None
+        group = self._get(track, "group_track")
+        if group is None:
+            return None
+        position = next((k for k, (_, _, t) in enumerate(sources) if t == group), None)
+        return self._get(group, "name", ""), position
+
+    def _grouped_note(self, sources, samples, tracks, entries):
+        """Mark grouped tracks and list those whose meter read 0 throughout.
+
+        `entries` are the report rows in sources order. Returns the list for the
+        report's `grouped` key, each with its group's level over the samples.
+        """
+        unread = []
+        for k, (_, _, track) in enumerate(sources):
+            group = self._group_of(track, sources)
+            if group is None:
+                continue
+            entries[k]["grouped"] = True
+            entries[k]["group"] = group[0]
+            if any(row[k][0] > 0 for _, _, row in samples):
+                continue
+            entries[k]["meter"] = "unavailable"
+            item = {"name": entries[k]["name"], "group": group[0]}
+            if group[1] is not None and samples:
+                levels = [row[group[1]][0] for _, _, row in samples]
+                item["group_avg"] = round(sum(levels) / len(levels), 3)
+                item["group_peak"] = round(max(levels), 3)
+            unread.append(item)
+        return unread
+
+    GROUPED_NOTE = ("Live reads 0 on the meters of these grouped tracks; their sound is in "
+                    "the group track's meter (group_avg, group_peak), so a 0 here is not "
+                    "silence and they are not classified.")
+
     def _meter_stats(self, sources, samples, column):
         stats = []
         for k, (kind, index, track) in enumerate(sources):
@@ -1645,16 +1694,21 @@ class AbletonMCP(ControlSurface):
         def finish(sources, samples):
             times = [t for t, _, _ in samples]
             gaps = [b - a for a, b in zip(times, times[1:])]
+            tracks = self._meter_stats(sources, samples, "")
+            grouped = self._grouped_note(sources, samples, tracks, tracks)
             report = {
                 "samples": len(samples),
                 "seconds": round(times[-1] - times[0], 3),
                 "interval": round(sum(gaps) / len(gaps), 3) if gaps else None,
                 "song_time": {"start": samples[0][1], "end": samples[-1][1]},
                 "is_playing": bool(song.is_playing),
-                "tracks": self._meter_stats(sources, samples, ""),
+                "tracks": tracks,
                 "scale": "Live's meter scale, 0.0 to 1.0, not dBFS. The meters hold "
                          "peaks briefly, so avg reads high.",
             }
+            if grouped:
+                report["grouped"] = grouped
+                report["note"] = self.GROUPED_NOTE
             if not song.is_playing:
                 report["warning"] = ("the transport is stopped, so the meters show only "
                                      "input monitoring and tails")
@@ -1678,6 +1732,10 @@ class AbletonMCP(ControlSurface):
                              else ENTRY_PERSIST_BEATS),
             "dip": float(params.get("dip") if params.get("dip") is not None
                          else ENTRY_DIP_BEATS),
+            "dip_depth": float(params.get("dip_depth") if params.get("dip_depth") is not None
+                               else ENTRY_DIP_DEPTH),
+            "lag": float(params.get("lag") if params.get("lag") is not None
+                         else ENTRY_LAG_BEATS),
             "decay": float(params.get("decay") if params.get("decay") is not None
                            else METER_DECAY_SECONDS),
         }
@@ -1685,6 +1743,8 @@ class AbletonMCP(ControlSurface):
             raise ValueError("need 0 <= silent < loud <= 1")
         if options["rise"] <= 0 or options["persist"] < 0 or options["dip"] <= 0:
             raise ValueError("rise and dip must be positive and persist not negative")
+        if not 0 < options["dip_depth"] < 1 or options["lag"] < 0:
+            raise ValueError("dip_depth must be between 0 and 1 and lag not negative")
         if not 0 <= options["decay"] <= 5:
             raise ValueError("decay must be between 0 and 5 seconds")
         return options
@@ -1694,7 +1754,7 @@ class AbletonMCP(ControlSurface):
         song = self._song_ref
         beat = float(params["beat"])
         preroll = float(params.get("preroll") or 5.0)
-        after = float(params.get("after") or 4.0)
+        after = float(params.get("after") or 8.0)
         if beat < 0 or preroll <= 0 or after <= 0:
             raise ValueError("beat must not be negative; preroll and after must be positive")
         options = self._probe_options(params)
@@ -1780,24 +1840,78 @@ class AbletonMCP(ControlSurface):
                 first = None
         return best
 
+    @staticmethod
+    def _relative_drop(trace_beats, mins, beat, options):
+        """Find a dropout in a track's per-beat minimum levels, relative to its own level.
+
+        Live's meters fall slowly, so a short dropout never reaches silence: it
+        shows as a fall in the per-beat minimum (issue #3). The reference is the
+        median of the minimums in the beats before `beat`: before_min would be
+        the dip itself when meter lag puts it a beat early, and before_avg is
+        pulled up by held peaks. A fall of `dip_depth` below it, starting no
+        more than `lag` beats before the beat and lasting `dip` beats, is
+        "dipped" if it recovers in the window and "left" if it does not.
+
+        Returns None, or a dict with kind, at, beats, reference, low and fall.
+        """
+        depth, dip, lag = options["dip_depth"], options["dip"], options["lag"]
+        points = [(b, m) for b, m in zip(trace_beats, mins) if m is not None]
+        before = sorted(m for b, m in points if b + 1 <= beat)
+        if len(before) < 2:
+            return None
+        middle = len(before) // 2
+        reference = (before[middle] if len(before) % 2
+                     else (before[middle - 1] + before[middle]) / 2.0)
+        if reference < options["silent"]:
+            return None
+        floor = reference * (1.0 - depth)
+        lead = [m for b, m in points if b + 1 <= beat - lag]
+        # A meter still falling from before the jump is a track that already stopped.
+        if (len(lead) >= 2 and lead[-1] <= lead[0] * (1.0 - depth)
+                and all(y <= x + 0.01 for x, y in zip(lead, lead[1:]))):
+            return None
+        # A track that already fell this far well before the beat (past the first
+        # beat, which can still be settling after the jump) is a pattern, not a dropout.
+        if any(m < floor for m in lead[1:]):
+            return None
+        runs, run = [], []
+        for b, m in points:
+            if m < floor:
+                run.append((b, m))
+            elif run:
+                runs.append(run)
+                run = []
+        if run:
+            runs.append(run)
+        last = points[-1][0]
+        found = None
+        for run in runs:
+            if run[0][0] < beat - lag or len(run) < dip:
+                continue
+            low = min(m for _, m in run)
+            drop = {"kind": "left" if run[-1][0] == last else "dipped", "at": run[0][0],
+                    "beats": len(run), "reference": round(reference, 3), "low": low,
+                    "fall": round(1.0 - low / reference, 3)}
+            if drop["kind"] == "left":
+                return drop
+            if found is None or drop["fall"] > found["fall"]:
+                found = drop
+        return found
+
     def _probe_report(self, sources, samples, beat, start, before_from, end, decay_beats,
                       options):
         """Classify each track's change at `beat` from its meter samples.
 
         Live's meters hold peaks and fall slowly, so averages blur short events
-        (issue #3). A level only counts when it holds for `persist` beats
-        beyond the meter's own `decay`, since one sparse hit keeps the meter up
-        for about that long; "left" and dips are judged from `decay` seconds
-        after the beat, once the meter has had time to fall; and a dip is a
-        stretch of at least `dip` beats near silence in a track whose level
-        never got that low before the beat.
+        (issue #3). An entry or rise only counts when it holds for `persist`
+        beats beyond the meter's own `decay`, since one sparse hit keeps the
+        meter up for about that long. Dips and exits are judged relative to the
+        track's own level by _relative_drop.
         """
         silent, loud, rise = options["silent"], options["loud"], options["rise"]
         hold = options["persist"] + decay_beats
-        dip = options["dip"]
         before = [s for s in samples if before_from <= s[1] < beat]
         after = [s for s in samples if beat <= s[1] <= end + 0.5]
-        settled = [s for s in after if s[1] >= beat + decay_beats]
         song_times = [s[1] for s in samples]
         gaps = [b - a for a, b in zip(song_times, song_times[1:]) if b > a]
         step = sum(gaps) / len(gaps) if gaps else 0.0
@@ -1814,11 +1928,10 @@ class AbletonMCP(ControlSurface):
             return {"min": round(min(values), 3), "avg": round(sum(values) / len(values), 3),
                     "peak": round(max(values), 3)}
 
-        tracks, entered, rose, dipped, left = [], [], [], [], []
+        entries = []
         for k, (kind, index, track) in enumerate(sources):
             entry = {"type": kind, "index": index, "name": self._get(track, "name", "")}
-            b_points, a_points, s_points = levels(before, k), levels(after, k), levels(settled, k)
-            for prefix, points in (("before_", b_points), ("after_", a_points)):
+            for prefix, points in (("before_", levels(before, k)), ("after_", levels(after, k))):
                 for key, value in summary(points).items():
                     entry[prefix + key] = value
             all_points = levels(samples, k)
@@ -1828,32 +1941,35 @@ class AbletonMCP(ControlSurface):
                 peaks.append(round(max(bucket), 3) if bucket else None)
                 mins.append(round(min(bucket), 3) if bucket else None)
             entry["trace_peak"], entry["trace_min"] = peaks, mins
+            entries.append(entry)
+        grouped = self._grouped_note(sources, samples, entries, entries)
 
+        entered, rose, dipped, left = [], [], [], []
+        for k, (kind, index, track) in enumerate(sources):
+            entry = entries[k]
             label = entry["name"] if kind == "regular" else "%s (%s)" % (entry["name"], kind)
-            if b_points and a_points:
-                b_values = [level for _, level in b_points]
-                b_min, b_avg, b_peak = min(b_values), sum(b_values) / len(b_values), max(b_values)
-                entry["change"] = round(entry["after_avg"] - entry["before_avg"], 3)
-                loud_after = self._longest_run(a_points, lambda v: v >= loud, step)
-                loud_before = self._longest_run(b_points, lambda v: v >= loud, step)
-                above_before = self._longest_run(a_points, lambda v: v >= b_avg + rise, step)
-                quiet_after = self._longest_run(s_points, lambda v: v < silent, step)
-                s_peak = max(level for _, level in s_points) if s_points else None
-                if b_peak < silent and loud_after >= hold:
-                    entry["entered"] = True
-                    entered.append(label)
-                elif entry["change"] >= rise and above_before >= hold:
-                    entry["rose"] = True
-                    rose.append(label)
-                elif s_peak is not None and s_peak < silent and loud_before >= hold:
-                    entry["left"] = True
-                    left.append(label)
-                elif b_min >= silent and quiet_after >= dip:
-                    entry["dipped"] = True
-                    entry["dip_beats"] = round(quiet_after, 2)
-                    dipped.append(label)
-            tracks.append(entry)
-        tracks.sort(key=lambda t: -abs(t.get("change", 0.0)))
+            b_points, a_points = levels(before, k), levels(after, k)
+            if entry.get("meter") == "unavailable" or not (b_points and a_points):
+                continue
+            b_values = [level for _, level in b_points]
+            b_avg, b_peak = sum(b_values) / len(b_values), max(b_values)
+            entry["change"] = round(entry["after_avg"] - entry["before_avg"], 3)
+            loud_after = self._longest_run(a_points, lambda v: v >= loud, step)
+            above_before = self._longest_run(a_points, lambda v: v >= b_avg + rise, step)
+            drop = self._relative_drop(trace_beats, entry["trace_min"], beat, options)
+            # A shorter `after` than the hold can still show an entry that lasts all of it.
+            if b_peak < silent and loud_after >= min(hold, end - beat):
+                entry["entered"] = True
+                entered.append(label)
+            elif entry["change"] >= rise and above_before >= hold:
+                entry["rose"] = True
+                rose.append(label)
+            elif drop is not None:
+                entry[drop["kind"]] = True
+                entry["drop"] = {key: drop[key]
+                                 for key in ("at", "beats", "reference", "low", "fall")}
+                (left if drop["kind"] == "left" else dipped).append(label)
+        tracks = sorted(entries, key=lambda t: -abs(t.get("change", 0.0)))
         report = {
             "beat": beat,
             "song_time": {"start": samples[0][1], "end": samples[-1][1]},
@@ -1866,15 +1982,20 @@ class AbletonMCP(ControlSurface):
             "tracks": tracks,
             "options": options,
             "scale": (
-                "Live's meter scale, 0.0 to 1.0; the meters hold peaks and fall slowly. "
-                "trace_peak and trace_min are each track's highest and lowest reading in "
-                "each beat of trace_beats. A level counts when it holds %(persist)g beats "
-                "beyond the meter's %(decay)g s decay. Entered: under %(silent)g before, "
-                "then at least %(loud)g. Rose: average up %(rise)g and held. Left: at least "
-                "%(loud)g before, under %(silent)g from %(decay)g s after the beat. Dipped: "
-                "never under %(silent)g before, then under it for %(dip)g beats or more "
-                "(a dip that lasts to the end of the window reads as left)." % options),
+                "Live's meter scale, 0.0 to 1.0; the meters hold peaks and fall slowly "
+                "(decay assumes %(decay)g s from about 0.8 to 0.1). trace_peak and "
+                "trace_min are each track's highest and lowest reading in each beat of "
+                "trace_beats. Entered: under %(silent)g before, then at least %(loud)g for "
+                "%(persist)g beats beyond the decay (or all of a shorter window). Rose: "
+                "average up %(rise)g and held as long. Dipped: trace_min fell at least %(dip_depth)g (as a fraction) below "
+                "the median trace_min before the beat, for %(dip)g beats or more, starting "
+                "no more than %(lag)g beats before the beat, then recovered. Left: the same "
+                "fall without recovery by the end of the window. drop.at is the first beat "
+                "of the fall." % options),
         }
+        if grouped:
+            report["grouped"] = grouped
+            report["note"] = self.GROUPED_NOTE
         if not before:
             report["warning"] = "no samples before the beat; increase preroll"
         return report

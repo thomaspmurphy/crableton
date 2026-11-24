@@ -120,10 +120,13 @@ display Live settled on and the error. `set_track_mixer` takes `volume_db` and
   returns min, average and peak per track. `probe_entry` plays across a beat
   and reports each track's before and after min, average and peak plus a
   per-beat trace, flagging tracks that enter, rise, dip or leave. Because the
-  meters hold peaks and fall slowly, a change only counts when it lasts a beat
-  beyond the meter's decay (one sparse hit is not an entry), "left" is judged
-  from half a second after the beat, and a dropout is found from minimums
-  rather than averages. The thresholds and windows are arguments. Both sample inside the Remote Script, one
+  meters hold peaks and fall slowly (about 2 s from 0.8 to 0.1, the `decay`
+  default), an entry only counts when it lasts a beat beyond that decay (one
+  sparse hit is not an entry), and a short dropout never reaches silence, so a
+  dip is a fall of 20% (`dip_depth`) below the track's own usual per-beat
+  minimum that recovers; without recovery it is "left". Tracks inside a group
+  can read 0 while they play, so they are flagged `grouped`, given the group's
+  level and never called silent. The thresholds and windows are arguments. Both sample inside the Remote Script, one
   pass over every meter per Live tick (about 100 ms), spread across ticks so
   Live is never blocked. Levels are Live's 0 to 1 meter scale, not dBFS, and the
   meters hold peaks, so averages read high.

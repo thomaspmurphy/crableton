@@ -1798,7 +1798,7 @@ class MeterTests(unittest.TestCase):
         self.assertEqual(report["rose"], [])
         self.assertEqual(report["tracks"][0]["name"], "Sub")
         self.assertTrue(report["tracks"][0]["entered"])
-        self.assertGreater(report["samples"]["before"], 10)
+        self.assertGreaterEqual(report["samples"]["before"], 10)
         self.assertGreater(report["samples"]["after"], 10)
         self.assertEqual(report["song_time"]["start"], 11.0)
         self.assertFalse(live.song.is_playing)
@@ -1808,9 +1808,10 @@ class MeterTests(unittest.TestCase):
 
 class HoldingMeterTrack(FakeTrack):
     """A meter like Live's: it catches every peak since the last read and falls
-    at `fall` per second, so short events smear across the following samples."""
+    at `fall` per second (about what issue #3 measured), so short events smear
+    across the following samples."""
 
-    def __init__(self, name, signal, live, fall=1.0):
+    def __init__(self, name, signal, live, fall=0.35):
         FakeTrack.__init__(self, name)
         self.signal = signal
         self.live = live
@@ -1885,10 +1886,10 @@ class ProbeMeterDecayTests(unittest.TestCase):
         self.assertGreater(entry["before_min"], 0.3)
         self.assertLess(entry["after_min"], 0.05)
         self.assertEqual(report["dipped"], ["Clicks"])
-        self.assertGreaterEqual(entry["dip_beats"], 2)
+        self.assertGreaterEqual(entry["drop"]["beats"], 2)
         self.assertEqual(report["left"], [])
         beats = report["trace_beats"]
-        self.assertLess(entry["trace_peak"][beats.index(278)], 0.05)
+        self.assertLess(entry["trace_peak"][beats.index(279)], 0.05)
         self.assertGreater(entry["trace_peak"][beats.index(281)], 0.3)
 
     def test_a_single_sparse_hit_is_not_a_rise(self):
@@ -1907,6 +1908,16 @@ class ProbeMeterDecayTests(unittest.TestCase):
         self.assertEqual(report["entered"], ["Lead", "Snap"])
         self.assertEqual(report["left"], ["Pad"])
 
+    def test_a_slow_meter_dip_that_never_nears_silence_still_reads_as_a_dip(self):
+        # A 3-beat volume dropout on a ~0.8 track: the meter only falls to about 0.4.
+        chord = lambda t: 0.0 if 337 <= t < 339 else 0.8
+        live_beat = {"beat": 337.0, "preroll": 5, "after": 8}
+        report = self.probe([("Chord", chord), ("Bass", lambda t: 0.5)], live_beat)
+        entry = self.track(report, "Chord")
+        self.assertGreater(entry["after_min"], mcp.ENTRY_SILENT)
+        self.assertEqual(report["dipped"], ["Chord"])
+        self.assertEqual(report["left"] + report["entered"] + report["rose"], [])
+
     def test_thresholds_and_windows_can_be_tuned(self):
         snap = lambda t: 0.85 if 277.0 <= t < 277.05 else 0.0
         report = self.probe([("Snap", snap)], {"preroll": 5, "persist": 0, "decay": 0.1})
@@ -1916,6 +1927,101 @@ class ProbeMeterDecayTests(unittest.TestCase):
         live.song.tempo = 120.0
         with self.assertRaises(ValueError):
             live.probe_entry({"beat": 8, "silent": 0.5, "loud": 0.4}, lambda r: None)
+
+
+class RelativeDropTests(unittest.TestCase):
+    """Per-beat trace_min values measured in Live 12.4.6 (issue #3), from 5 beats
+    before the probed beat."""
+
+    def drop(self, mins, **options):
+        beats = list(range(332, 332 + len(mins)))
+        opts = mcp.AbletonMCP._probe_options(options)
+        return mcp.AbletonMCP._relative_drop(beats, mins, 337, opts)
+
+    def test_a_three_beat_dropout_a_beat_early_is_a_dip(self):
+        drop = self.drop([0.81, 0.81, 0.81, 0.402, 0.486, 0.802, 0.802, 0.802, 0.655, 0.555,
+                          0.841, 0.841, 0.841])
+        self.assertEqual(drop["kind"], "dipped")
+        self.assertEqual((drop["at"], drop["beats"], drop["reference"]), (335, 2, 0.81))
+
+    def test_a_two_beat_dropout_that_only_falls_a_quarter_is_a_dip(self):
+        drop = self.drop([0.594, 0.811, 0.811, 0.811, 0.854, 0.854, 0.854, 0.706, 0.607,
+                          0.845, 0.845, 0.845, 0.861])
+        self.assertEqual((drop["kind"], drop["at"], drop["beats"]), ("dipped", 340, 1))
+        self.assertIsNone(self.drop([0.594, 0.811, 0.811, 0.811, 0.854, 0.854, 0.854, 0.706,
+                                     0.607, 0.845, 0.845, 0.845, 0.861], dip_depth=0.35))
+
+    def test_a_fade_out_is_left_not_dipped(self):
+        drop = self.drop([0.685, 0.685, 0.685, 0.685, 0.241] + [0.0] * 8)
+        self.assertEqual((drop["kind"], drop["at"]), ("left", 336))
+
+    def test_quiet_sparse_and_steady_tracks_do_not_drop(self):
+        self.assertIsNone(self.drop([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.85, 0.5, 0.2, 0.0,
+                                     0.0, 0.0, 0.0]))
+        self.assertIsNone(self.drop([0.5, 0.52, 0.49, 0.5, 0.51, 0.5, 0.48, 0.5, 0.5, 0.52,
+                                     0.5, 0.5, 0.5]))
+
+    def test_a_pattern_that_already_gaps_before_the_beat_is_not_a_dip(self):
+        self.assertIsNone(self.drop([0.4, 0.0, 0.4, 0.4, 0.4, 0.4, 0.0, 0.4, 0.4, 0.4,
+                                     0.4, 0.4, 0.4]))
+
+    def test_a_meter_still_falling_after_the_jump_is_not_left(self):
+        self.assertIsNone(self.drop([0.775, 0.65, 0.525, 0.4, 0.275, 0.15, 0.025, 0.0, 0.0,
+                                     0.0, 0.0, 0.0, 0.0]))
+
+    def test_a_dip_too_long_before_the_beat_is_not_counted(self):
+        self.assertIsNone(self.drop([0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8,
+                                     0.8, 0.8]))
+        self.assertIsNone(self.drop([0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8,
+                                     0.8, 0.8], lag=0))
+        with self.assertRaises(ValueError):
+            mcp.AbletonMCP._probe_options({"dip_depth": 1.5})
+
+
+class GroupedMeterTests(unittest.TestCase):
+    """Live 12.4 reads 0 on the meters of tracks inside a group (issue #3)."""
+
+    def grouped_set(self):
+        live = metered_set()
+        group = MeteredTrack("Perc", lambda t: 0.61, live.song)
+        group.is_foldable = True
+        clicks = MeteredTrack("Clicks", lambda t: 0.0, live.song)
+        snap = MeteredTrack("Snap", lambda t: 0.0, live.song)
+        for track in (clicks, snap):
+            track.is_grouped = True
+            track.group_track = group
+        live.song.tracks = live.song.tracks + [group, clicks, snap]
+        return live
+
+    def test_get_meters_marks_grouped_tracks_and_notes_the_group_level(self):
+        live = self.grouped_set()
+        responses = []
+        report = live.settle(live.get_meters({"duration": 0.5}, responses.append),
+                             responses, ticks=30)
+        clicks = next(t for t in report["tracks"] if t["name"] == "Clicks")
+        self.assertEqual((clicks["grouped"], clicks["group"], clicks["meter"]),
+                         (True, "Perc", "unavailable"))
+        self.assertEqual([(g["name"], g["group"], g["group_avg"]) for g in report["grouped"]],
+                         [("Clicks", "Perc", 0.61), ("Snap", "Perc", 0.61)])
+        self.assertIn("group", report["note"])
+        keys = next(t for t in report["tracks"] if t["name"] == "Keys")
+        self.assertNotIn("grouped", keys)
+
+    def test_probe_never_reads_a_grouped_zero_as_silence(self):
+        live = self.grouped_set()
+        live.song.tracks[-1].level = lambda t: 0.5 if t < 16 else 0.0
+        live.song.drift = 0.25
+        responses = []
+        report = live.settle(live.probe_entry({"beat": 16}, responses.append),
+                             responses, ticks=200)
+        self.assertEqual(report["entered"], ["Sub"])
+        self.assertEqual(report["left"], ["Pad", "Snap"])
+        clicks = next(t for t in report["tracks"] if t["name"] == "Clicks")
+        self.assertEqual(clicks["meter"], "unavailable")
+        self.assertNotIn("change", clicks)
+        self.assertEqual([g["name"] for g in report["grouped"]], ["Clicks"])
+        self.assertTrue(next(t for t in report["tracks"] if t["name"] == "Snap")["grouped"])
+
 
 # ── Simpler samples ──────────────────────────────────────────────────────────
 
