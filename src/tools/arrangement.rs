@@ -165,19 +165,30 @@ pub fn tools() -> Vec<ToolDef> {
             "create_locator",
             "create_locator",
             "Place a named locator in the Arrangement, or rename the one already at that \
-             position. Useful for marking out sections before arranging.",
+             position. Useful for marking out sections before arranging. Live can only toggle \
+             a locator at the playhead, so the playhead is moved there first (a playing \
+             transport pauses briefly). If Live will not put the playhead on that exact beat \
+             (a stopped playhead can snap to the Arrangement grid), nothing is created and \
+             the error names the beat it reached. Not available in `batch`.",
         )
         .text("name", "Locator label, e.g. \"Chorus\" or \"Drop\".")
         .num("time", "Position in beats from the start of the Arrangement. In 4/4, bar 17 is beat 64."),
 
-        ToolDef::new("delete_locator", "delete_locator", "Delete one Arrangement locator.")
+        ToolDef::new(
+            "delete_locator",
+            "delete_locator",
+            "Delete one Arrangement locator. The playhead jumps to it and the toggle only \
+             happens once the playhead is on it, so a miss deletes nothing. Not available in \
+             `batch`.",
+        )
             .destructive()
             .int("index", "0-based index, as listed by `get_locators`."),
 
         ToolDef::new(
             "clear_locators",
             "clear_locators",
-            "Delete every Arrangement locator, or all of those within a beat range.",
+            "Delete every Arrangement locator, or all of those within a beat range, one at a \
+             time with the same checks as `delete_locator`. Not available in `batch`.",
         )
         .destructive()
         .opt_num("from_time", "Only delete locators at or after this beat.")

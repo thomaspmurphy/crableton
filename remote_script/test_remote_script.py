@@ -668,17 +668,27 @@ class FakeTrack(ClipLane):
 class FakeCue(object):
     """time is read-only, as on Live's CuePoint."""
 
-    def __init__(self, time):
+    def __init__(self, time, song=None):
         self._time = time
         self.name = ""
+        self.song = song
 
     @property
     def time(self):
         return self._time
 
+    def jump(self):
+        self.song.move_playhead(self._time, snap=False)
+
 
 class FakeSong(object):
-    """With `lag`, transport and record changes land on the next tick, as in Live."""
+    """With `lag`, transport and record changes land on the next tick, as in Live.
+
+    Playhead moves always land on the next tick. With `snap` (in beats), a
+    stopped playhead written through current_song_time rounds to that grid, as
+    Live 12.4.6 was seen to do; `snap_jump_by` makes jump_by snap too.
+    CuePoint.jump lands exactly.
+    """
 
     def __init__(self, tracks):
         self.tracks = tracks
@@ -687,20 +697,46 @@ class FakeSong(object):
         self._record_mode = False
         self.arrangement_overdub = False
         self.is_playing = False
-        self.current_song_time = 0.0
+        self._time = 0.0
         self.started_from = None
         self.lag = False
         self.queued = []
+        self.moves = []
         self.cue_points = []
         self.drift = 0.0
+        self.snap = None
+        self.snap_jump_by = False
+
+    @property
+    def current_song_time(self):
+        return self._time
+
+    @current_song_time.setter
+    def current_song_time(self, value):
+        self.move_playhead(value, snap=True)
+
+    def move_playhead(self, value, snap):
+        if snap and self.snap and not self.is_playing:
+            value = round(value / self.snap) * self.snap
+        self.moves.append(lambda: setattr(self, "_time", float(value)))
+
+    def jump_by(self, beats):
+        self.move_playhead(self._time + beats, snap=self.snap_jump_by)
 
     def set_or_delete_cue(self):
         for cue in self.cue_points:
-            if abs(cue.time - self.current_song_time) < 1e-6:
+            if abs(cue.time - self._time) < 1e-6:
                 self.cue_points.remove(cue)
                 return
-        self.cue_points.append(FakeCue(self.current_song_time))
+        self.cue_points.append(FakeCue(self._time, self))
         self.cue_points.sort(key=lambda c: c.time)
+
+    def add_cue(self, time, name=""):
+        cue = FakeCue(float(time), self)
+        cue.name = name
+        self.cue_points.append(cue)
+        self.cue_points.sort(key=lambda c: c.time)
+        return cue
 
     def continue_playing(self):
         self.is_playing = True
@@ -712,6 +748,9 @@ class FakeSong(object):
             change()
 
     def apply_queued(self):
+        moves, self.moves = self.moves, []
+        for move in moves:
+            move()
         queued, self.queued = self.queued, []
         for change in queued:
             change()
@@ -757,7 +796,7 @@ class LiveSetScript(object):
         self.song.apply_queued()
         pending, self.pending = self.pending, []
         if self.song.is_playing:
-            self.song.current_song_time += self.song.drift
+            self.song._time += self.song.drift
         for fn in pending:
             fn()
 
@@ -769,6 +808,7 @@ class LiveSetScript(object):
             if responses:
                 break
             self.tick()
+        self.song.apply_queued()  # let a restored playhead land
         return responses[0]["ok"]
 
 
@@ -1389,7 +1429,7 @@ class CreateLocatorTests(unittest.TestCase):
     def test_a_playing_transport_is_paused_so_the_locator_lands_exactly(self):
         live = a_set()
         live.song.is_playing = True
-        live.song.current_song_time = 10.0
+        live.song._time = 10.0
         live.song.drift = 0.79
         result = self.create(live, {"time": 64.0, "name": "Drop"})
         self.assertEqual(result["time"], 64.0)
@@ -1401,7 +1441,7 @@ class CreateLocatorTests(unittest.TestCase):
 
     def test_a_stopped_transport_is_left_stopped_at_its_old_position(self):
         live = a_set()
-        live.song.current_song_time = 3.0
+        live.song._time = 3.0
         result = self.create(live, {"time": 8.0})
         self.assertEqual(result["time"], 8.0)
         self.assertNotIn("interrupted_playback", result)
@@ -1415,6 +1455,115 @@ class CreateLocatorTests(unittest.TestCase):
         live.song.cue_points.append(FakeCue(8.0))
         self.assertTrue(live.create_locator({"time": 8.0, "name": "A"})["renamed"])
 
+
+class LocatorPlayheadTests(unittest.TestCase):
+    """Issue #13: a stopped Live 12.4.6 playhead snapped beat 140 to 128."""
+
+    def run_deferred(self, live, call, params):
+        responses = []
+        result = call(params, responses.append)
+        self.assertIs(result, mcp.DEFERRED)
+        for _ in range(80):
+            if responses:
+                break
+            live.tick()
+        live.song.apply_queued()
+        self.assertEqual(len(responses), 1)
+        return responses[0]
+
+    def stopped_at_12(self, snap=None, snap_jump_by=False):
+        live = a_set()
+        live.song._time = 12.0
+        live.song.snap = snap
+        live.song.snap_jump_by = snap_jump_by
+        return live
+
+    def times(self, live):
+        return [c.time for c in live.song.cue_points]
+
+    def test_creates_exactly_at_the_target(self):
+        live = self.stopped_at_12()
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0, "name": "Drop"})
+        self.assertEqual(outcome["ok"]["time"], 140.0)
+        self.assertEqual(self.times(live), [140.0])
+        self.assertEqual(live.song.cue_points[0].name, "Drop")
+        self.assertEqual(live.song.current_song_time, 12.0)
+
+    def test_a_snapped_playhead_is_walked_onto_the_target_with_jump_by(self):
+        live = self.stopped_at_12(snap=32.0)
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0, "name": "Drop"})
+        self.assertEqual(outcome["ok"]["time"], 140.0)
+        self.assertEqual(self.times(live), [140.0])
+
+    def test_a_playhead_that_will_not_reach_the_target_toggles_nothing(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0})
+        self.assertIn("stopped on beat 128", outcome["error"])
+        self.assertIn("nothing was toggled", outcome["error"])
+        self.assertEqual(self.times(live), [])
+        self.assertFalse(live.song.is_playing)
+
+    def test_a_cue_created_elsewhere_is_deleted_again(self):
+        live = self.stopped_at_12()
+        real_toggle = live.song.set_or_delete_cue
+        calls = []
+
+        def misplaced_toggle():
+            calls.append(live.song._time)
+            if len(calls) == 1:
+                live.song.add_cue(128.0)
+            else:
+                real_toggle()
+
+        live.song.set_or_delete_cue = misplaced_toggle
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0})
+        self.assertIn("beat 128 instead of 140", outcome["error"])
+        self.assertIn("deleted again", outcome["error"])
+        self.assertEqual(self.times(live), [])
+        self.assertEqual(calls, [140.0, 128.0])
+
+    def test_playback_is_paused_and_resumed_around_the_toggle(self):
+        live = self.stopped_at_12(snap=32.0)
+        live.song.is_playing = True
+        live.song.drift = 0.5
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0})
+        self.assertTrue(outcome["ok"]["interrupted_playback"])
+        self.assertEqual(self.times(live), [140.0])
+        self.assertTrue(live.song.is_playing)
+
+    def test_delete_jumps_to_the_cue_and_creates_nothing(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        live.song.add_cue(64.0, "A")
+        live.song.add_cue(140.0, "B")
+        outcome = self.run_deferred(live, live.delete_locator, {"index": 1})
+        self.assertEqual(outcome["ok"]["deleted"], "B")
+        self.assertEqual(self.times(live), [64.0])
+
+    def test_delete_refuses_when_the_playhead_cannot_reach_the_cue(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        cue = live.song.add_cue(140.0, "B")
+        cue.jump = lambda: None
+        outcome = self.run_deferred(live, live.delete_locator, {"index": 0})
+        self.assertIn("was not deleted", outcome["error"])
+        self.assertEqual(self.times(live), [140.0])
+
+    def test_clear_removes_only_the_range_and_creates_nothing(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        for time in (4.0, 140.0, 268.0, 304.0):
+            live.song.add_cue(time)
+        outcome = self.run_deferred(live, live.clear_locators, {"from_time": 100.0})
+        self.assertEqual(outcome["ok"]["deleted_count"], 3)
+        self.assertEqual(self.times(live), [4.0])
+
+    def test_deleting_inside_a_batch_is_refused(self):
+        live = self.stopped_at_12()
+        live.song.add_cue(140.0)
+        with self.assertRaises(RuntimeError):
+            live.delete_locator({"index": 0})
+        with self.assertRaises(RuntimeError):
+            live.clear_locators({})
+        self.assertEqual(live.clear_locators({"to_time": 100.0})["deleted_count"], 0)
+        self.assertEqual(self.times(live), [140.0])
 
 # ── Set by displayed value ───────────────────────────────────────────────────
 
@@ -1639,7 +1788,7 @@ class MeterTests(unittest.TestCase):
 
     def test_probe_flags_what_enters_and_restores_the_playhead(self):
         live = metered_set()
-        live.song.current_song_time = 40.0
+        live.song._time = 40.0
         live.song.drift = 0.25
         responses = []
         result = live.probe_entry({"beat": 16, "preroll": 5, "after": 4}, responses.append)
