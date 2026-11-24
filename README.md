@@ -78,6 +78,14 @@ the API; to change it, rewrite the Session clip envelope and copy again.
 Parameters of devices nested inside racks are not scanned for envelopes.
 `get_device_parameters` reports each parameter's `automation_state`.
 
+**Locators.** Live can only toggle a locator at the playhead, and a stopped
+playhead can snap to the Arrangement grid (Live 12.4.6 put beat 140 on 128).
+The locator tools therefore toggle only once the playhead reads the exact
+beat, check afterwards that exactly the intended locator appeared or vanished,
+and delete any stray one again. When the beat cannot be reached they change
+nothing and name the beat the playhead reached; switching off Snap to Grid
+(Cmd-4) usually helps. A playing transport pauses for the few ticks this takes.
+
 **Analysis.** `analyze_harmony`, `analyze_arrangement` and `analyze_mix`
 compute from one session snapshot, server-side, so the large payload does not
 reach the model. They report measurements, not opinions:

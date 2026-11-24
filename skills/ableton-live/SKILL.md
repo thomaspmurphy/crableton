@@ -54,8 +54,8 @@ batch(steps: [
 ```
 
 Steps run in order and stop at the first failure unless `stop_on_error: false`.
-`create_locator`, `get_meters` and `probe_entry` cannot go in a batch, because
-they need more than one pass.
+`create_locator`, `delete_locator`, `clear_locators`, `get_meters` and
+`probe_entry` cannot go in a batch, because they need more than one pass.
 Neither can the tools crableton answers itself: `lom_reference`,
 `device_reference` and the `analyze_*` family.
 
@@ -169,7 +169,10 @@ Build in the Session view, then place clips with
 copies in one call: a 4-bar loop across 32 bars is one call, not eight.
 
 Mark sections with `create_locator` before arranging; it makes the result
-legible to the person looking at the screen.
+legible to the person looking at the screen. Live toggles locators at the
+playhead, and a stopped playhead can snap to the Arrangement grid; when it
+cannot reach the beat, the tool creates nothing and names the beat it reached.
+Ask the user to switch off Snap to Grid (Cmd-4) or use that beat.
 
 To redo an arrangement pass, clear the old one first: `clear_arrangement`
 (whole track, all tracks, or a beat range) and `clear_locators`. Otherwise you

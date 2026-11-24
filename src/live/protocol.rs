@@ -53,6 +53,8 @@ pub fn timeout_for(command: &str, default: Duration) -> Duration {
         "batch" => 120,
         // Sample meters across ticks for up to a minute.
         "get_meters" | "probe_entry" => 90,
+        // Each locator toggle waits several ticks for the playhead to land.
+        "create_locator" | "delete_locator" | "clear_locators" => 60,
         _ => return default,
     };
     Duration::from_secs(secs).max(default)

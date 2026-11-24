@@ -48,6 +48,12 @@ DEFERRED = object()
 # How many main-thread ticks a deferred handler may wait before giving up.
 MAX_DEFER_TICKS = 40
 
+# Locators within this many beats of each other are the same locator.
+CUE_TOLERANCE = 1e-3
+
+# Ticks the playhead must hold still before a move is judged to have landed.
+PLAYHEAD_SETTLE_TICKS = 3
+
 
 # ── Value maps ───────────────────────────────────────────────────────────────
 # The MCP layer speaks in musician's terms; Live speaks in enum indices.
@@ -3844,25 +3850,188 @@ class AbletonMCP(ControlSurface):
             ]
         }
 
-    def _find_cue(self, time_value, tolerance=1e-3):
+    def _find_cue(self, time_value, tolerance=CUE_TOLERANCE):
         for cue in self._song_ref.cue_points:
-            if abs(cue.time - time_value) < tolerance:
+            if abs(cue.time - time_value) <= tolerance:
                 return cue
         return None
+
+    def _cue_times(self):
+        return [float(cue.time) for cue in self._song_ref.cue_points]
+
+    @staticmethod
+    def _new_cue_times(before, after):
+        return [t for t in after if not any(abs(t - b) <= CUE_TOLERANCE for b in before)]
+
+    def _locator_session(self):
+        """Prepare the transport for toggling a cue; return (was_playing, restore).
+
+        set_or_delete_cue toggles a cue wherever the playhead actually is, so a
+        moving playhead is stopped first. Global launch quantization is switched
+        off for the duration because Live quantizes playhead jumps by it; it
+        may also be behind the stopped playhead snapping to a coarse grid seen
+        in Live 12.4.6 (beat 140 landed on 128).
+        """
+        song = self._song_ref
+        original_time = song.current_song_time
+        was_playing = bool(song.is_playing)
+        quantization = getattr(song, "clip_trigger_quantization", None)
+        if was_playing:
+            song.stop_playing()
+        if quantization:
+            try:
+                song.clip_trigger_quantization = 0
+            except Exception as e:
+                self.log_message("could not switch off launch quantization: %s" % e)
+                quantization = None
+
+        def restore():
+            if quantization:
+                try:
+                    song.clip_trigger_quantization = quantization
+                except Exception as e:
+                    self.log_message("could not restore launch quantization: %s" % e)
+            song.current_song_time = original_time
+            if was_playing:
+                song.continue_playing()
+
+        return was_playing, restore
+
+    def _place_playhead(self, target, done, moves=()):
+        """Move the playhead onto `target` and call done(landed, problem).
+
+        problem is None once current_song_time reads the target. Each move is
+        tried in turn, the next one only after the playhead has stopped moving
+        somewhere else: the caller's own moves first (e.g. CuePoint.jump), then
+        writing current_song_time, then jump_by from wherever it landed.
+        """
+        song = self._song_ref
+
+        def jump_by(now):
+            song.jump_by(target - now)
+
+        moves = list(moves) + [
+            ("current_song_time", lambda now: setattr(song, "current_song_time", target)),
+            ("jump_by", jump_by),
+        ]
+        state = {"ticks": 0, "last": None, "stable": 0, "skip": False, "tried": []}
+
+        def next_move():
+            name, move = moves.pop(0)
+            state["tried"].append(name)
+            state["last"], state["stable"], state["skip"] = None, 0, False
+            try:
+                move(float(song.current_song_time))
+            except Exception as e:
+                self.log_message("playhead move %s failed: %s" % (name, e))
+                state["skip"] = True
+
+        def check():
+            state["ticks"] += 1
+            now = float(song.current_song_time)
+            if abs(now - target) <= CUE_TOLERANCE:
+                done(now, None)
+                return
+            if state["last"] is not None and abs(now - state["last"]) <= 1e-6:
+                state["stable"] += 1
+            else:
+                state["stable"] = 0
+            state["last"] = now
+            settled = state["skip"] or state["stable"] >= PLAYHEAD_SETTLE_TICKS
+            if state["ticks"] > MAX_DEFER_TICKS or (settled and not moves):
+                done(now, "tried %s" % ", ".join(state["tried"]))
+                return
+            if settled:
+                next_move()
+            self._defer(1, check)
+
+        next_move()
+        self._defer(1, check)
+
+    @staticmethod
+    def _unreachable(target, landed, consequence):
+        return (
+            "Live would not put the playhead on beat %g; it stopped on beat %g. %s "
+            "Locators can only be toggled at the playhead, so nothing was toggled. "
+            "The stopped playhead appears to snap to the Arrangement grid: switch off "
+            "Snap to Grid (Cmd-4 / Ctrl-4) or zoom in on that region and retry, or use "
+            "a beat the playhead does reach, such as %g." % (target, landed, consequence, landed)
+        )
+
+    def _remove_cue_at(self, time_value, done):
+        """Delete the cue at time_value, verified; done(ok, message).
+
+        The cue is only toggled once the playhead reads its time, and afterwards
+        the cue must be gone with no new one in its place.
+        """
+        song = self._song_ref
+        cue = self._find_cue(time_value)
+        if cue is None:
+            done(False, "there is no locator at beat %g" % time_value)
+            return
+        before = self._cue_times()
+
+        def placed(landed, problem):
+            if problem is not None:
+                done(False, self._unreachable(time_value, landed, "The locator was not deleted."))
+                return
+            if self._find_cue(time_value) is None:
+                done(False, "the locator at beat %g vanished before it could be deleted"
+                     % time_value)
+                return
+            song.set_or_delete_cue()
+            self._defer(1, lambda: verify(0))
+
+        def verify(attempt):
+            after = self._cue_times()
+            gone = self._find_cue(time_value) is None
+            added = self._new_cue_times(before, after)
+            if not gone and not added and attempt < 3:
+                self._defer(1, lambda: verify(attempt + 1))
+                return
+            if added:
+                done(False, "deleting the locator at beat %g created one at beat %s instead"
+                     % (time_value, ", ".join("%g" % t for t in added)))
+            elif not gone:
+                done(False, "Live did not delete the locator at beat %g" % time_value)
+            else:
+                done(True, None)
+
+        self._place_playhead(time_value, placed, moves=[("CuePoint.jump", lambda now: cue.jump())])
+
+    def _remove_cues(self, times, done):
+        """Delete cues one by one, stopping at the first failure; done(removed, error)."""
+        times = list(times)
+        removed = []
+
+        def step():
+            if not times:
+                done(removed, None)
+                return
+            time_value = times.pop(0)
+
+            def after(ok, message):
+                if not ok:
+                    done(removed, message)
+                    return
+                removed.append(time_value)
+                step()
+
+            self._remove_cue_at(time_value, after)
+
+        step()
 
     def _create_locator(self, params, respond):
         """Place a locator at a beat position.
 
-        Live can only toggle a cue at the playhead, and writing
-        current_song_time does not necessarily take effect within the same
-        tick, so the toggle waits for the playhead to actually arrive rather
-        than assuming it has. Toggling early creates a stray locator at the old
-        position and then fails to find the intended one.
-
-        CuePoint.time is read-only and a moving playhead never sits on the
-        target, so while the transport plays it is stopped for the few ticks
-        the toggle takes, then the old position is restored and playback
-        continued (a brief audible gap, reported as interrupted_playback).
+        Live can only toggle a cue at the playhead (CuePoint.time is
+        read-only), so the playhead is moved there and the toggle happens only
+        once current_song_time reads the target. Live may land the playhead
+        somewhere else (it snapped beat 140 to 128 while stopped in 12.4.6);
+        toggling there would create a stray cue, so the call fails instead.
+        Afterwards exactly one new cue must sit at the target; any other new
+        cue is deleted again. A playing transport is stopped for the few
+        ticks this takes and continued afterwards (interrupted_playback).
         """
         song = self._song_ref
         name = str(params.get("name") or "")
@@ -3881,46 +4050,58 @@ class AbletonMCP(ControlSurface):
                 "create_locator needs more than one pass and cannot run inside a batch"
             )
 
-        original_time = song.current_song_time
-        was_playing = song.is_playing
-        if was_playing:
-            song.stop_playing()
-        song.current_song_time = target
+        before = self._cue_times()
+        was_playing, restore = self._locator_session()
 
-        state = {"ticks": 0}
+        def fail(message):
+            restore()
+            respond({"error": message})
 
-        def restore():
-            song.current_song_time = original_time
-            if was_playing:
-                song.continue_playing()
-
-        def toggle():
-            state["ticks"] += 1
-            if abs(song.current_song_time - target) > 1e-3:
-                if state["ticks"] > MAX_DEFER_TICKS:
-                    restore()
-                    respond({"error": "Live would not move the playhead to beat %s" % target})
-                    return
-                self._defer(1, toggle)
+        def placed(landed, problem):
+            if problem is not None:
+                fail(self._unreachable(target, landed, "No locator was created."))
                 return
-
             try:
                 song.set_or_delete_cue()
-                cue = self._find_cue(target)
-                if cue is not None and name:
-                    cue.name = name
-                restore()
-                if cue is None:
-                    respond({"error": "Live did not create a locator at beat %s" % target})
-                    return
-                result = {"name": cue.name, "time": cue.time, "created": True}
-                if was_playing:
-                    result["interrupted_playback"] = True
-                respond({"ok": result})
             except Exception as e:
-                respond({"error": str(e)})
+                fail(str(e))
+                return
+            self._defer(1, lambda: verify(0))
 
-        self._defer(1, toggle)
+        def verify(attempt):
+            added = self._new_cue_times(before, self._cue_times())
+            if not added and attempt < 3:
+                self._defer(1, lambda: verify(attempt + 1))
+                return
+            strays = [t for t in added if abs(t - target) > CUE_TOLERANCE]
+            if strays:
+                self._remove_cues(strays, lambda removed, error: finish(strays, removed, error))
+            else:
+                finish([], [], None)
+
+        def finish(strays, removed, error):
+            cue = self._find_cue(target)
+            if cue is not None and name:
+                cue.name = name
+            restore()
+            if strays:
+                listed = ", ".join("%g" % t for t in strays)
+                if error is None:
+                    note = "it was deleted again"
+                else:
+                    note = "deleting it again failed (%s); remove it by hand" % error
+                respond({"error": "Live created a locator at beat %s instead of %g; %s"
+                         % (listed, target, note)})
+                return
+            if cue is None:
+                respond({"error": "Live did not create a locator at beat %g" % target})
+                return
+            result = {"name": cue.name, "time": cue.time, "created": True}
+            if was_playing:
+                result["interrupted_playback"] = True
+            respond({"ok": result})
+
+        self._place_playhead(target, placed)
         return DEFERRED
 
     def _delete_locator(self, params, respond):
@@ -3928,42 +4109,64 @@ class AbletonMCP(ControlSurface):
         index = int(params["index"])
         if not 0 <= index < len(cues):
             raise IndexError("locator %d does not exist (there are %d)" % (index, len(cues)))
+        if respond is None:
+            raise RuntimeError(
+                "delete_locator needs more than one pass and cannot run inside a batch"
+            )
         cue = cues[index]
-        name, time_value = cue.name, cue.time
-        # A cue knows how to move the playhead onto itself, which is exactly
-        # the position set_or_delete_cue needs in order to remove it.
-        cue.jump()
-        self._song_ref.set_or_delete_cue()
-        return {"deleted": name, "was_at": time_value,
-                "remaining": len(self._song_ref.cue_points)}
+        name, time_value = cue.name, float(cue.time)
+        was_playing, restore = self._locator_session()
+
+        def done(ok, message):
+            restore()
+            if not ok:
+                respond({"error": message})
+                return
+            result = {"deleted": name, "was_at": time_value,
+                      "remaining": len(self._song_ref.cue_points)}
+            if was_playing:
+                result["interrupted_playback"] = True
+            respond({"ok": result})
+
+        self._remove_cue_at(time_value, done)
+        return DEFERRED
 
     def _clear_locators(self, params, respond):
         from_time = params.get("from_time")
         to_time = params.get("to_time")
-        deleted = []
+        targets = []
+        for cue in self._song_ref.cue_points:
+            if from_time is not None and cue.time < float(from_time):
+                continue
+            if to_time is not None and cue.time >= float(to_time):
+                continue
+            targets.append({"name": cue.name, "time": float(cue.time)})
 
-        while True:
-            target = None
-            for cue in self._song_ref.cue_points:
-                if from_time is not None and cue.time < float(from_time):
-                    continue
-                if to_time is not None and cue.time >= float(to_time):
-                    continue
-                target = cue
-                break
-            if target is None:
-                break
+        if not targets:
+            return {"deleted_count": 0, "deleted": [],
+                    "remaining": len(self._song_ref.cue_points)}
+        if respond is None:
+            raise RuntimeError(
+                "clear_locators needs more than one pass and cannot run inside a batch"
+            )
 
-            name, time_value = target.name, target.time
-            target.jump()
-            self._song_ref.set_or_delete_cue()
-            deleted.append({"name": name, "time": time_value})
+        was_playing, restore = self._locator_session()
 
-            if len(deleted) > 512:  # guard against a cue that will not delete
-                break
+        def done(removed, error):
+            restore()
+            deleted = [t for t in targets if t["time"] in removed]
+            if error is not None:
+                respond({"error": "deleted %d of %d locators, then stopped: %s"
+                         % (len(deleted), len(targets), error)})
+                return
+            result = {"deleted_count": len(deleted), "deleted": deleted,
+                      "remaining": len(self._song_ref.cue_points)}
+            if was_playing:
+                result["interrupted_playback"] = True
+            respond({"ok": result})
 
-        return {"deleted_count": len(deleted), "deleted": deleted,
-                "remaining": len(self._song_ref.cue_points)}
+        self._remove_cues([t["time"] for t in targets], done)
+        return DEFERRED
 
     def _jump_to_locator(self, params, respond):
         cues = list(self._song_ref.cue_points)
