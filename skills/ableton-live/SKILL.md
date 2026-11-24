@@ -54,8 +54,8 @@ batch(steps: [
 ```
 
 Steps run in order and stop at the first failure unless `stop_on_error: false`.
-`create_locator`, `get_meters` and `probe_entry` cannot go in a batch, because
-they need more than one pass.
+`create_locator`, `delete_locator`, `clear_locators`, `get_meters` and
+`probe_entry` cannot go in a batch, because they need more than one pass.
 Neither can the tools crableton answers itself: `lom_reference`,
 `device_reference` and the `analyze_*` family.
 
@@ -92,8 +92,13 @@ You cannot hear the set, but you can measure it:
   and Detune that tune it to the set's root or fifth. Reach for it first when a
   kick or bass "sounds out of tune" or a low end beats.
 - `get_meters` (while playing) gives each track's average and peak level;
-  `probe_entry(beat)` plays across a beat and names the tracks that enter
-  there. It starts playback, so the user hears it; say so. Neither runs in
+  `probe_entry(beat)` plays across a beat and names the tracks that enter,
+  rise, dip (a fall of 20% or more below the track's own level for a beat or
+  more, which recovers) or leave there, with a per-beat trace to check them
+  against. Tracks in a group may read 0 although they play: both tools flag
+  them `grouped` with the group's level, so do not read that 0 as silence. Make `preroll` and `after` span a whole
+  pattern for sparse parts, and an `after` longer than a dropout so it reads
+  as a dip rather than left. It starts playback, so the user hears it; say so. Neither runs in
   `batch`. Levels are Live's 0 to 1 meter scale, not dB: compare tracks.
 
 They report measurements, not opinions, and each carries a caveat about what it
@@ -169,7 +174,10 @@ Build in the Session view, then place clips with
 copies in one call: a 4-bar loop across 32 bars is one call, not eight.
 
 Mark sections with `create_locator` before arranging; it makes the result
-legible to the person looking at the screen.
+legible to the person looking at the screen. Live toggles locators at the
+playhead, and a stopped playhead can snap to the Arrangement grid; when it
+cannot reach the beat, the tool creates nothing and names the beat it reached.
+Ask the user to switch off Snap to Grid (Cmd-4) or use that beat.
 
 To redo an arrangement pass, clear the old one first: `clear_arrangement`
 (whole track, all tracks, or a beat range) and `clear_locators`. Otherwise you

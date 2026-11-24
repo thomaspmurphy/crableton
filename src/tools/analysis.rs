@@ -68,10 +68,12 @@ pub fn tools() -> Vec<ToolDef> {
             "get_meters",
             "Listen to the mix the only way available: sample the output meter of every \
              regular, return and master track for `duration` seconds and report each one's \
-             average and peak (plus left and right peaks), with the song time covered. Run \
+             min, average and peak (plus left and right peaks), with the song time covered. Run \
              it while the set plays. Levels are Live's 0 to 1 meter scale, not dBFS, and the \
              meters hold peaks briefly, so averages read high: compare tracks with each other \
-             rather than against a number. Not available in `batch`.",
+             rather than against a number. Tracks inside a group may read 0 although they \
+             play: they come back `grouped` with `meter: \"unavailable\"` and the group's level \
+             under `grouped`. Not available in `batch`.",
         )
         .read_only()
         .opt_num("duration", "Seconds to sample, up to 30.")
@@ -87,18 +89,50 @@ pub fn tools() -> Vec<ToolDef> {
             "probe_entry",
             "Find what enters at a point in the Arrangement: move the playhead to `beat` minus \
              `preroll`, play across `beat`, sample every track's meter, and report each \
-             track's level before and after, flagging tracks that enter, rise or drop out. \
-             The playhead (and transport, if it was stopped) is restored afterwards. Use it \
-             to find which part causes a clash heard only at one bar. Starts playback, so \
-             the user hears it. Not available in `batch`.",
+             track's min, average and peak before and after plus a per-beat trace \
+             (`trace_peak`, `trace_min`), flagging tracks that enter, rise, dip or leave. \
+             Live's meters hold peaks and fall slowly, so an entry or rise only counts when \
+             it holds `persist` beats beyond `decay`, and a short dropout never reaches \
+             silence: a dip is a fall of `dip_depth` below the track's own usual per-beat \
+             minimum, lasting `dip` beats and starting up to `lag` beats before the beat, \
+             that recovers; the same fall without recovery is left. Make the windows span \
+             whole patterns for sparse parts, and `after` outlast a dropout, or it reads as \
+             left. Grouped tracks whose meters read 0 are listed under `grouped` with the \
+             group's level and not classified. The playhead (and transport, if it was \
+             stopped) is restored afterwards. Use it to find which part causes a \
+             clash heard only at one bar. Starts playback, so the user hears it. Not \
+             available in `batch`.",
         )
         .num("beat", "The beat to probe, e.g. 64 for bar 17 in 4/4.")
         .opt_num("preroll", "Beats to play before `beat`.")
         .default(json!(5.0))
         .opt_num("after", "Beats to play after `beat`.")
-        .default(json!(4.0))
+        .default(json!(8.0))
         .opt_num("interval", "Seconds between samples, 0.1 at the finest.")
-        .default(json!(0.1)),
+        .default(json!(0.1))
+        .opt_num("silent", "Meter level (0 to 1) below which a track counts as silent.")
+        .default(json!(0.1))
+        .opt_num("loud", "Meter level a track must reach to count as playing.")
+        .default(json!(0.3))
+        .opt_num("rise", "Rise in average level that counts as `rose`.")
+        .default(json!(0.15))
+        .opt_num("persist", "Beats a level must hold beyond the meter decay to count.")
+        .default(json!(1.0))
+        .opt_num("dip", "Beats a fall must last to count as a dropout.")
+        .default(json!(1.0))
+        .opt_num(
+            "dip_depth",
+            "Fraction below the track's usual per-beat minimum that counts as a fall.",
+        )
+        .default(json!(0.2))
+        .opt_num("lag", "Beats before `beat` a fall may start, for meter and timing lag.")
+        .default(json!(2.0))
+        .opt_num(
+            "decay",
+            "Seconds Live's meter takes to fall from about 0.8 to 0.1 once a sound stops. \
+             Sets how long an entry must hold and how much of the preroll is skipped.",
+        )
+        .default(json!(2.0)),
 
         ToolDef::new(
             "analyze_sample",

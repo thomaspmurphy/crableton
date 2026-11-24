@@ -39,7 +39,7 @@ except ImportError:
 DEFAULT_PORT = 9878
 HOST = "127.0.0.1"
 
-SCRIPT_VERSION = "2.4.0"
+SCRIPT_VERSION = "2.6.0"
 PROTOCOL_VERSION = 2
 
 # Sentinel returned by handlers that will answer on a later tick.
@@ -47,6 +47,12 @@ DEFERRED = object()
 
 # How many main-thread ticks a deferred handler may wait before giving up.
 MAX_DEFER_TICKS = 40
+
+# Locators within this many beats of each other are the same locator.
+CUE_TOLERANCE = 1e-3
+
+# Ticks the playhead must hold still before a move is judged to have landed.
+PLAYHEAD_SETTLE_TICKS = 3
 
 
 # ── Value maps ───────────────────────────────────────────────────────────────
@@ -201,6 +207,19 @@ MAX_PROBE_SECONDS = 60.0
 ENTRY_SILENT = 0.1
 ENTRY_LOUD = 0.3
 ENTRY_RISE = 0.15
+# A change must last this many beats to count, which rejects a single hit.
+ENTRY_PERSIST_BEATS = 1.0
+# A fall this long (in per-beat minimums) that recovers is a dropout.
+ENTRY_DIP_BEATS = 1.0
+# A dip is a fall of this fraction below the track's usual per-beat minimum. Live's
+# meters fall so slowly that 2-3 beat volume dropouts only took a ~0.8 track to
+# 0.40 and 0.61 (issue #3), never near silence; 0.35 would miss the second.
+ENTRY_DIP_DEPTH = 0.2
+# The meters lag, so a dip may show up to this many beats either side of the beat.
+ENTRY_LAG_BEATS = 2.0
+# Roughly how long Live's output meters take to fall from ~0.8 to ~0.1 after a
+# sound stops: issue #3's dropout traces fell about 0.3 per second.
+METER_DECAY_SECONDS = 2.0
 
 
 def create_instance(c_instance):
@@ -1599,6 +1618,48 @@ class AbletonMCP(ControlSurface):
             raise ValueError("interval must be positive")
         return max(interval, METER_TICK_SECONDS)
 
+    def _group_of(self, track, sources):
+        """(group name, its position in sources) for a grouped track, else None.
+
+        Live 12.4 reads 0 on the meters of tracks inside a group while the
+        group track meters their sum (issue #3).
+        """
+        if not self._get(track, "is_grouped", False):
+            return None
+        group = self._get(track, "group_track")
+        if group is None:
+            return None
+        position = next((k for k, (_, _, t) in enumerate(sources) if t == group), None)
+        return self._get(group, "name", ""), position
+
+    def _grouped_note(self, sources, samples, tracks, entries):
+        """Mark grouped tracks and list those whose meter read 0 throughout.
+
+        `entries` are the report rows in sources order. Returns the list for the
+        report's `grouped` key, each with its group's level over the samples.
+        """
+        unread = []
+        for k, (_, _, track) in enumerate(sources):
+            group = self._group_of(track, sources)
+            if group is None:
+                continue
+            entries[k]["grouped"] = True
+            entries[k]["group"] = group[0]
+            if any(row[k][0] > 0 for _, _, row in samples):
+                continue
+            entries[k]["meter"] = "unavailable"
+            item = {"name": entries[k]["name"], "group": group[0]}
+            if group[1] is not None and samples:
+                levels = [row[group[1]][0] for _, _, row in samples]
+                item["group_avg"] = round(sum(levels) / len(levels), 3)
+                item["group_peak"] = round(max(levels), 3)
+            unread.append(item)
+        return unread
+
+    GROUPED_NOTE = ("Live reads 0 on the meters of these grouped tracks; their sound is in "
+                    "the group track's meter (group_avg, group_peak), so a 0 here is not "
+                    "silence and they are not classified.")
+
     def _meter_stats(self, sources, samples, column):
         stats = []
         for k, (kind, index, track) in enumerate(sources):
@@ -1606,6 +1667,7 @@ class AbletonMCP(ControlSurface):
             levels = [r[0] for r in rows]
             entry = {"type": kind, "index": index, "name": self._get(track, "name", "")}
             if levels:
+                entry[column + "min"] = round(min(levels), 3)
                 entry[column + "avg"] = round(sum(levels) / len(levels), 3)
                 entry[column + "peak"] = round(max(levels), 3)
                 if not column:
@@ -1632,16 +1694,21 @@ class AbletonMCP(ControlSurface):
         def finish(sources, samples):
             times = [t for t, _, _ in samples]
             gaps = [b - a for a, b in zip(times, times[1:])]
+            tracks = self._meter_stats(sources, samples, "")
+            grouped = self._grouped_note(sources, samples, tracks, tracks)
             report = {
                 "samples": len(samples),
                 "seconds": round(times[-1] - times[0], 3),
                 "interval": round(sum(gaps) / len(gaps), 3) if gaps else None,
                 "song_time": {"start": samples[0][1], "end": samples[-1][1]},
                 "is_playing": bool(song.is_playing),
-                "tracks": self._meter_stats(sources, samples, ""),
+                "tracks": tracks,
                 "scale": "Live's meter scale, 0.0 to 1.0, not dBFS. The meters hold "
                          "peaks briefly, so avg reads high.",
             }
+            if grouped:
+                report["grouped"] = grouped
+                report["note"] = self.GROUPED_NOTE
             if not song.is_playing:
                 report["warning"] = ("the transport is stopped, so the meters show only "
                                      "input monitoring and tails")
@@ -1651,22 +1718,57 @@ class AbletonMCP(ControlSurface):
                             lambda e: respond({"error": str(e)}))
         return DEFERRED
 
+    @staticmethod
+    def _probe_options(params):
+        """Optional probe_entry tuning, with the defaults tuned on issue #3's cases."""
+        options = {
+            "silent": float(params.get("silent") if params.get("silent") is not None
+                            else ENTRY_SILENT),
+            "loud": float(params.get("loud") if params.get("loud") is not None
+                          else ENTRY_LOUD),
+            "rise": float(params.get("rise") if params.get("rise") is not None
+                          else ENTRY_RISE),
+            "persist": float(params.get("persist") if params.get("persist") is not None
+                             else ENTRY_PERSIST_BEATS),
+            "dip": float(params.get("dip") if params.get("dip") is not None
+                         else ENTRY_DIP_BEATS),
+            "dip_depth": float(params.get("dip_depth") if params.get("dip_depth") is not None
+                               else ENTRY_DIP_DEPTH),
+            "lag": float(params.get("lag") if params.get("lag") is not None
+                         else ENTRY_LAG_BEATS),
+            "decay": float(params.get("decay") if params.get("decay") is not None
+                           else METER_DECAY_SECONDS),
+        }
+        if not 0 <= options["silent"] < options["loud"] <= 1:
+            raise ValueError("need 0 <= silent < loud <= 1")
+        if options["rise"] <= 0 or options["persist"] < 0 or options["dip"] <= 0:
+            raise ValueError("rise and dip must be positive and persist not negative")
+        if not 0 < options["dip_depth"] < 1 or options["lag"] < 0:
+            raise ValueError("dip_depth must be between 0 and 1 and lag not negative")
+        if not 0 <= options["decay"] <= 5:
+            raise ValueError("decay must be between 0 and 5 seconds")
+        return options
+
     def _probe_entry(self, params, respond):
         """Play across `beat` and report which tracks get louder there."""
         song = self._song_ref
         beat = float(params["beat"])
         preroll = float(params.get("preroll") or 5.0)
-        after = float(params.get("after") or 4.0)
+        after = float(params.get("after") or 8.0)
         if beat < 0 or preroll <= 0 or after <= 0:
             raise ValueError("beat must not be negative; preroll and after must be positive")
+        options = self._probe_options(params)
         interval = self._meter_interval(params)
         if respond is None:
             raise RuntimeError("probe_entry plays the set over time and cannot run inside "
                                "a batch")
         start = max(0.0, beat - preroll)
         end = beat + after
-        # The meters still hold what was playing before the jump for a moment.
-        settle = min(1.0, (beat - start) / 2.0)
+        decay_beats = options["decay"] * float(song.tempo) / 60.0
+        # The meters still hold what was playing before the jump for about as
+        # long as they take to fall after a track stops, so the before window
+        # skips that much (but never more than half the preroll).
+        settle = min(decay_beats, (beat - start) / 2.0)
         budget = min(MAX_PROBE_SECONDS, (end - start) * 60.0 / float(song.tempo) * 2.0 + 3.0)
         original = song.current_song_time
         was_playing = bool(song.is_playing)
@@ -1685,7 +1787,8 @@ class AbletonMCP(ControlSurface):
 
         def finish(sources, samples):
             restore()
-            report = self._probe_report(sources, samples, beat, start + settle, end)
+            report = self._probe_report(sources, samples, beat, start, start + settle, end,
+                                        decay_beats, options)
             report["restored_to"] = original
             if state.get("warning"):
                 report["warning"] = state["warning"]
@@ -1723,40 +1826,176 @@ class AbletonMCP(ControlSurface):
         self._defer(1, positioned)
         return DEFERRED
 
-    def _probe_report(self, sources, samples, beat, before_from, end):
+    @staticmethod
+    def _longest_run(points, test, step):
+        """Longest stretch, in beats, of consecutive (song_time, level) points passing test."""
+        best, first, last = 0.0, None, None
+        for song_time, level in points:
+            if test(level):
+                if first is None:
+                    first = song_time
+                last = song_time
+                best = max(best, last - first + step)
+            else:
+                first = None
+        return best
+
+    @staticmethod
+    def _relative_drop(trace_beats, mins, beat, options):
+        """Find a dropout in a track's per-beat minimum levels, relative to its own level.
+
+        Live's meters fall slowly, so a short dropout never reaches silence: it
+        shows as a fall in the per-beat minimum (issue #3). The reference is the
+        median of the minimums in the beats before `beat`: before_min would be
+        the dip itself when meter lag puts it a beat early, and before_avg is
+        pulled up by held peaks. A fall of `dip_depth` below it, starting no
+        more than `lag` beats before the beat and lasting `dip` beats, is
+        "dipped" if it recovers in the window and "left" if it does not.
+
+        Returns None, or a dict with kind, at, beats, reference, low and fall.
+        """
+        depth, dip, lag = options["dip_depth"], options["dip"], options["lag"]
+        points = [(b, m) for b, m in zip(trace_beats, mins) if m is not None]
+        before = sorted(m for b, m in points if b + 1 <= beat)
+        if len(before) < 2:
+            return None
+        middle = len(before) // 2
+        reference = (before[middle] if len(before) % 2
+                     else (before[middle - 1] + before[middle]) / 2.0)
+        if reference < options["silent"]:
+            return None
+        floor = reference * (1.0 - depth)
+        lead = [m for b, m in points if b + 1 <= beat - lag]
+        # A meter still falling from before the jump is a track that already stopped.
+        if (len(lead) >= 2 and lead[-1] <= lead[0] * (1.0 - depth)
+                and all(y <= x + 0.01 for x, y in zip(lead, lead[1:]))):
+            return None
+        # A track that already fell this far well before the beat (past the first
+        # beat, which can still be settling after the jump) is a pattern, not a dropout.
+        if any(m < floor for m in lead[1:]):
+            return None
+        runs, run = [], []
+        for b, m in points:
+            if m < floor:
+                run.append((b, m))
+            elif run:
+                runs.append(run)
+                run = []
+        if run:
+            runs.append(run)
+        last = points[-1][0]
+        found = None
+        for run in runs:
+            if run[0][0] < beat - lag or len(run) < dip:
+                continue
+            low = min(m for _, m in run)
+            drop = {"kind": "left" if run[-1][0] == last else "dipped", "at": run[0][0],
+                    "beats": len(run), "reference": round(reference, 3), "low": low,
+                    "fall": round(1.0 - low / reference, 3)}
+            if drop["kind"] == "left":
+                return drop
+            if found is None or drop["fall"] > found["fall"]:
+                found = drop
+        return found
+
+    def _probe_report(self, sources, samples, beat, start, before_from, end, decay_beats,
+                      options):
+        """Classify each track's change at `beat` from its meter samples.
+
+        Live's meters hold peaks and fall slowly, so averages blur short events
+        (issue #3). An entry or rise only counts when it holds for `persist`
+        beats beyond the meter's own `decay`, since one sparse hit keeps the
+        meter up for about that long. Dips and exits are judged relative to the
+        track's own level by _relative_drop.
+        """
+        silent, loud, rise = options["silent"], options["loud"], options["rise"]
+        hold = options["persist"] + decay_beats
         before = [s for s in samples if before_from <= s[1] < beat]
         after = [s for s in samples if beat <= s[1] <= end + 0.5]
-        before_stats = self._meter_stats(sources, before, "before_")
-        after_stats = self._meter_stats(sources, after, "after_")
-        tracks, entered, rose, left = [], [], [], []
-        for b, a in zip(before_stats, after_stats):
-            entry = dict(b)
-            entry.update(a)
-            label = entry["name"] if entry["type"] == "regular" else (
-                "%s (%s)" % (entry["name"], entry["type"]))
-            if before and after:
-                entry["change"] = round(entry["after_avg"] - entry["before_avg"], 3)
-                if entry["before_peak"] < ENTRY_SILENT and entry["after_peak"] >= ENTRY_LOUD:
-                    entry["entered"] = True
-                    entered.append(label)
-                elif entry["change"] >= ENTRY_RISE:
-                    rose.append(label)
-                elif entry["after_peak"] < ENTRY_SILENT and entry["before_peak"] >= ENTRY_LOUD:
-                    left.append(label)
-            tracks.append(entry)
-        tracks.sort(key=lambda t: -t.get("change", 0.0))
+        song_times = [s[1] for s in samples]
+        gaps = [b - a for a, b in zip(song_times, song_times[1:]) if b > a]
+        step = sum(gaps) / len(gaps) if gaps else 0.0
+        first_beat = int(math.floor(start))
+        trace_beats = list(range(first_beat, int(math.ceil(end))))
+
+        def levels(window, k):
+            return [(s[1], s[2][k][0]) for s in window]
+
+        def summary(points):
+            values = [level for _, level in points]
+            if not values:
+                return {}
+            return {"min": round(min(values), 3), "avg": round(sum(values) / len(values), 3),
+                    "peak": round(max(values), 3)}
+
+        entries = []
+        for k, (kind, index, track) in enumerate(sources):
+            entry = {"type": kind, "index": index, "name": self._get(track, "name", "")}
+            for prefix, points in (("before_", levels(before, k)), ("after_", levels(after, k))):
+                for key, value in summary(points).items():
+                    entry[prefix + key] = value
+            all_points = levels(samples, k)
+            peaks, mins = [], []
+            for b in trace_beats:
+                bucket = [level for t, level in all_points if b <= t < b + 1]
+                peaks.append(round(max(bucket), 3) if bucket else None)
+                mins.append(round(min(bucket), 3) if bucket else None)
+            entry["trace_peak"], entry["trace_min"] = peaks, mins
+            entries.append(entry)
+        grouped = self._grouped_note(sources, samples, entries, entries)
+
+        entered, rose, dipped, left = [], [], [], []
+        for k, (kind, index, track) in enumerate(sources):
+            entry = entries[k]
+            label = entry["name"] if kind == "regular" else "%s (%s)" % (entry["name"], kind)
+            b_points, a_points = levels(before, k), levels(after, k)
+            if entry.get("meter") == "unavailable" or not (b_points and a_points):
+                continue
+            b_values = [level for _, level in b_points]
+            b_avg, b_peak = sum(b_values) / len(b_values), max(b_values)
+            entry["change"] = round(entry["after_avg"] - entry["before_avg"], 3)
+            loud_after = self._longest_run(a_points, lambda v: v >= loud, step)
+            above_before = self._longest_run(a_points, lambda v: v >= b_avg + rise, step)
+            drop = self._relative_drop(trace_beats, entry["trace_min"], beat, options)
+            # A shorter `after` than the hold can still show an entry that lasts all of it.
+            if b_peak < silent and loud_after >= min(hold, end - beat):
+                entry["entered"] = True
+                entered.append(label)
+            elif entry["change"] >= rise and above_before >= hold:
+                entry["rose"] = True
+                rose.append(label)
+            elif drop is not None:
+                entry[drop["kind"]] = True
+                entry["drop"] = {key: drop[key]
+                                 for key in ("at", "beats", "reference", "low", "fall")}
+                (left if drop["kind"] == "left" else dipped).append(label)
+        tracks = sorted(entries, key=lambda t: -abs(t.get("change", 0.0)))
         report = {
             "beat": beat,
             "song_time": {"start": samples[0][1], "end": samples[-1][1]},
             "samples": {"before": len(before), "after": len(after)},
             "entered": entered,
             "rose": rose,
+            "dipped": dipped,
             "left": left,
+            "trace_beats": trace_beats,
             "tracks": tracks,
-            "scale": "Live's meter scale, 0.0 to 1.0. Entered: peak under %.2f before and "
-                     "at least %.2f after. Rose: average up by %.2f or more."
-                     % (ENTRY_SILENT, ENTRY_LOUD, ENTRY_RISE),
+            "options": options,
+            "scale": (
+                "Live's meter scale, 0.0 to 1.0; the meters hold peaks and fall slowly "
+                "(decay assumes %(decay)g s from about 0.8 to 0.1). trace_peak and "
+                "trace_min are each track's highest and lowest reading in each beat of "
+                "trace_beats. Entered: under %(silent)g before, then at least %(loud)g for "
+                "%(persist)g beats beyond the decay (or all of a shorter window). Rose: "
+                "average up %(rise)g and held as long. Dipped: trace_min fell at least %(dip_depth)g (as a fraction) below "
+                "the median trace_min before the beat, for %(dip)g beats or more, starting "
+                "no more than %(lag)g beats before the beat, then recovered. Left: the same "
+                "fall without recovery by the end of the window. drop.at is the first beat "
+                "of the fall." % options),
         }
+        if grouped:
+            report["grouped"] = grouped
+            report["note"] = self.GROUPED_NOTE
         if not before:
             report["warning"] = "no samples before the beat; increase preroll"
         return report
@@ -3844,25 +4083,188 @@ class AbletonMCP(ControlSurface):
             ]
         }
 
-    def _find_cue(self, time_value, tolerance=1e-3):
+    def _find_cue(self, time_value, tolerance=CUE_TOLERANCE):
         for cue in self._song_ref.cue_points:
-            if abs(cue.time - time_value) < tolerance:
+            if abs(cue.time - time_value) <= tolerance:
                 return cue
         return None
+
+    def _cue_times(self):
+        return [float(cue.time) for cue in self._song_ref.cue_points]
+
+    @staticmethod
+    def _new_cue_times(before, after):
+        return [t for t in after if not any(abs(t - b) <= CUE_TOLERANCE for b in before)]
+
+    def _locator_session(self):
+        """Prepare the transport for toggling a cue; return (was_playing, restore).
+
+        set_or_delete_cue toggles a cue wherever the playhead actually is, so a
+        moving playhead is stopped first. Global launch quantization is switched
+        off for the duration because Live quantizes playhead jumps by it; it
+        may also be behind the stopped playhead snapping to a coarse grid seen
+        in Live 12.4.6 (beat 140 landed on 128).
+        """
+        song = self._song_ref
+        original_time = song.current_song_time
+        was_playing = bool(song.is_playing)
+        quantization = getattr(song, "clip_trigger_quantization", None)
+        if was_playing:
+            song.stop_playing()
+        if quantization:
+            try:
+                song.clip_trigger_quantization = 0
+            except Exception as e:
+                self.log_message("could not switch off launch quantization: %s" % e)
+                quantization = None
+
+        def restore():
+            if quantization:
+                try:
+                    song.clip_trigger_quantization = quantization
+                except Exception as e:
+                    self.log_message("could not restore launch quantization: %s" % e)
+            song.current_song_time = original_time
+            if was_playing:
+                song.continue_playing()
+
+        return was_playing, restore
+
+    def _place_playhead(self, target, done, moves=()):
+        """Move the playhead onto `target` and call done(landed, problem).
+
+        problem is None once current_song_time reads the target. Each move is
+        tried in turn, the next one only after the playhead has stopped moving
+        somewhere else: the caller's own moves first (e.g. CuePoint.jump), then
+        writing current_song_time, then jump_by from wherever it landed.
+        """
+        song = self._song_ref
+
+        def jump_by(now):
+            song.jump_by(target - now)
+
+        moves = list(moves) + [
+            ("current_song_time", lambda now: setattr(song, "current_song_time", target)),
+            ("jump_by", jump_by),
+        ]
+        state = {"ticks": 0, "last": None, "stable": 0, "skip": False, "tried": []}
+
+        def next_move():
+            name, move = moves.pop(0)
+            state["tried"].append(name)
+            state["last"], state["stable"], state["skip"] = None, 0, False
+            try:
+                move(float(song.current_song_time))
+            except Exception as e:
+                self.log_message("playhead move %s failed: %s" % (name, e))
+                state["skip"] = True
+
+        def check():
+            state["ticks"] += 1
+            now = float(song.current_song_time)
+            if abs(now - target) <= CUE_TOLERANCE:
+                done(now, None)
+                return
+            if state["last"] is not None and abs(now - state["last"]) <= 1e-6:
+                state["stable"] += 1
+            else:
+                state["stable"] = 0
+            state["last"] = now
+            settled = state["skip"] or state["stable"] >= PLAYHEAD_SETTLE_TICKS
+            if state["ticks"] > MAX_DEFER_TICKS or (settled and not moves):
+                done(now, "tried %s" % ", ".join(state["tried"]))
+                return
+            if settled:
+                next_move()
+            self._defer(1, check)
+
+        next_move()
+        self._defer(1, check)
+
+    @staticmethod
+    def _unreachable(target, landed, consequence):
+        return (
+            "Live would not put the playhead on beat %g; it stopped on beat %g. %s "
+            "Locators can only be toggled at the playhead, so nothing was toggled. "
+            "The stopped playhead appears to snap to the Arrangement grid: switch off "
+            "Snap to Grid (Cmd-4 / Ctrl-4) or zoom in on that region and retry, or use "
+            "a beat the playhead does reach, such as %g." % (target, landed, consequence, landed)
+        )
+
+    def _remove_cue_at(self, time_value, done):
+        """Delete the cue at time_value, verified; done(ok, message).
+
+        The cue is only toggled once the playhead reads its time, and afterwards
+        the cue must be gone with no new one in its place.
+        """
+        song = self._song_ref
+        cue = self._find_cue(time_value)
+        if cue is None:
+            done(False, "there is no locator at beat %g" % time_value)
+            return
+        before = self._cue_times()
+
+        def placed(landed, problem):
+            if problem is not None:
+                done(False, self._unreachable(time_value, landed, "The locator was not deleted."))
+                return
+            if self._find_cue(time_value) is None:
+                done(False, "the locator at beat %g vanished before it could be deleted"
+                     % time_value)
+                return
+            song.set_or_delete_cue()
+            self._defer(1, lambda: verify(0))
+
+        def verify(attempt):
+            after = self._cue_times()
+            gone = self._find_cue(time_value) is None
+            added = self._new_cue_times(before, after)
+            if not gone and not added and attempt < 3:
+                self._defer(1, lambda: verify(attempt + 1))
+                return
+            if added:
+                done(False, "deleting the locator at beat %g created one at beat %s instead"
+                     % (time_value, ", ".join("%g" % t for t in added)))
+            elif not gone:
+                done(False, "Live did not delete the locator at beat %g" % time_value)
+            else:
+                done(True, None)
+
+        self._place_playhead(time_value, placed, moves=[("CuePoint.jump", lambda now: cue.jump())])
+
+    def _remove_cues(self, times, done):
+        """Delete cues one by one, stopping at the first failure; done(removed, error)."""
+        times = list(times)
+        removed = []
+
+        def step():
+            if not times:
+                done(removed, None)
+                return
+            time_value = times.pop(0)
+
+            def after(ok, message):
+                if not ok:
+                    done(removed, message)
+                    return
+                removed.append(time_value)
+                step()
+
+            self._remove_cue_at(time_value, after)
+
+        step()
 
     def _create_locator(self, params, respond):
         """Place a locator at a beat position.
 
-        Live can only toggle a cue at the playhead, and writing
-        current_song_time does not necessarily take effect within the same
-        tick, so the toggle waits for the playhead to actually arrive rather
-        than assuming it has. Toggling early creates a stray locator at the old
-        position and then fails to find the intended one.
-
-        CuePoint.time is read-only and a moving playhead never sits on the
-        target, so while the transport plays it is stopped for the few ticks
-        the toggle takes, then the old position is restored and playback
-        continued (a brief audible gap, reported as interrupted_playback).
+        Live can only toggle a cue at the playhead (CuePoint.time is
+        read-only), so the playhead is moved there and the toggle happens only
+        once current_song_time reads the target. Live may land the playhead
+        somewhere else (it snapped beat 140 to 128 while stopped in 12.4.6);
+        toggling there would create a stray cue, so the call fails instead.
+        Afterwards exactly one new cue must sit at the target; any other new
+        cue is deleted again. A playing transport is stopped for the few
+        ticks this takes and continued afterwards (interrupted_playback).
         """
         song = self._song_ref
         name = str(params.get("name") or "")
@@ -3881,46 +4283,58 @@ class AbletonMCP(ControlSurface):
                 "create_locator needs more than one pass and cannot run inside a batch"
             )
 
-        original_time = song.current_song_time
-        was_playing = song.is_playing
-        if was_playing:
-            song.stop_playing()
-        song.current_song_time = target
+        before = self._cue_times()
+        was_playing, restore = self._locator_session()
 
-        state = {"ticks": 0}
+        def fail(message):
+            restore()
+            respond({"error": message})
 
-        def restore():
-            song.current_song_time = original_time
-            if was_playing:
-                song.continue_playing()
-
-        def toggle():
-            state["ticks"] += 1
-            if abs(song.current_song_time - target) > 1e-3:
-                if state["ticks"] > MAX_DEFER_TICKS:
-                    restore()
-                    respond({"error": "Live would not move the playhead to beat %s" % target})
-                    return
-                self._defer(1, toggle)
+        def placed(landed, problem):
+            if problem is not None:
+                fail(self._unreachable(target, landed, "No locator was created."))
                 return
-
             try:
                 song.set_or_delete_cue()
-                cue = self._find_cue(target)
-                if cue is not None and name:
-                    cue.name = name
-                restore()
-                if cue is None:
-                    respond({"error": "Live did not create a locator at beat %s" % target})
-                    return
-                result = {"name": cue.name, "time": cue.time, "created": True}
-                if was_playing:
-                    result["interrupted_playback"] = True
-                respond({"ok": result})
             except Exception as e:
-                respond({"error": str(e)})
+                fail(str(e))
+                return
+            self._defer(1, lambda: verify(0))
 
-        self._defer(1, toggle)
+        def verify(attempt):
+            added = self._new_cue_times(before, self._cue_times())
+            if not added and attempt < 3:
+                self._defer(1, lambda: verify(attempt + 1))
+                return
+            strays = [t for t in added if abs(t - target) > CUE_TOLERANCE]
+            if strays:
+                self._remove_cues(strays, lambda removed, error: finish(strays, removed, error))
+            else:
+                finish([], [], None)
+
+        def finish(strays, removed, error):
+            cue = self._find_cue(target)
+            if cue is not None and name:
+                cue.name = name
+            restore()
+            if strays:
+                listed = ", ".join("%g" % t for t in strays)
+                if error is None:
+                    note = "it was deleted again"
+                else:
+                    note = "deleting it again failed (%s); remove it by hand" % error
+                respond({"error": "Live created a locator at beat %s instead of %g; %s"
+                         % (listed, target, note)})
+                return
+            if cue is None:
+                respond({"error": "Live did not create a locator at beat %g" % target})
+                return
+            result = {"name": cue.name, "time": cue.time, "created": True}
+            if was_playing:
+                result["interrupted_playback"] = True
+            respond({"ok": result})
+
+        self._place_playhead(target, placed)
         return DEFERRED
 
     def _delete_locator(self, params, respond):
@@ -3928,42 +4342,64 @@ class AbletonMCP(ControlSurface):
         index = int(params["index"])
         if not 0 <= index < len(cues):
             raise IndexError("locator %d does not exist (there are %d)" % (index, len(cues)))
+        if respond is None:
+            raise RuntimeError(
+                "delete_locator needs more than one pass and cannot run inside a batch"
+            )
         cue = cues[index]
-        name, time_value = cue.name, cue.time
-        # A cue knows how to move the playhead onto itself, which is exactly
-        # the position set_or_delete_cue needs in order to remove it.
-        cue.jump()
-        self._song_ref.set_or_delete_cue()
-        return {"deleted": name, "was_at": time_value,
-                "remaining": len(self._song_ref.cue_points)}
+        name, time_value = cue.name, float(cue.time)
+        was_playing, restore = self._locator_session()
+
+        def done(ok, message):
+            restore()
+            if not ok:
+                respond({"error": message})
+                return
+            result = {"deleted": name, "was_at": time_value,
+                      "remaining": len(self._song_ref.cue_points)}
+            if was_playing:
+                result["interrupted_playback"] = True
+            respond({"ok": result})
+
+        self._remove_cue_at(time_value, done)
+        return DEFERRED
 
     def _clear_locators(self, params, respond):
         from_time = params.get("from_time")
         to_time = params.get("to_time")
-        deleted = []
+        targets = []
+        for cue in self._song_ref.cue_points:
+            if from_time is not None and cue.time < float(from_time):
+                continue
+            if to_time is not None and cue.time >= float(to_time):
+                continue
+            targets.append({"name": cue.name, "time": float(cue.time)})
 
-        while True:
-            target = None
-            for cue in self._song_ref.cue_points:
-                if from_time is not None and cue.time < float(from_time):
-                    continue
-                if to_time is not None and cue.time >= float(to_time):
-                    continue
-                target = cue
-                break
-            if target is None:
-                break
+        if not targets:
+            return {"deleted_count": 0, "deleted": [],
+                    "remaining": len(self._song_ref.cue_points)}
+        if respond is None:
+            raise RuntimeError(
+                "clear_locators needs more than one pass and cannot run inside a batch"
+            )
 
-            name, time_value = target.name, target.time
-            target.jump()
-            self._song_ref.set_or_delete_cue()
-            deleted.append({"name": name, "time": time_value})
+        was_playing, restore = self._locator_session()
 
-            if len(deleted) > 512:  # guard against a cue that will not delete
-                break
+        def done(removed, error):
+            restore()
+            deleted = [t for t in targets if t["time"] in removed]
+            if error is not None:
+                respond({"error": "deleted %d of %d locators, then stopped: %s"
+                         % (len(deleted), len(targets), error)})
+                return
+            result = {"deleted_count": len(deleted), "deleted": deleted,
+                      "remaining": len(self._song_ref.cue_points)}
+            if was_playing:
+                result["interrupted_playback"] = True
+            respond({"ok": result})
 
-        return {"deleted_count": len(deleted), "deleted": deleted,
-                "remaining": len(self._song_ref.cue_points)}
+        self._remove_cues([t["time"] for t in targets], done)
+        return DEFERRED
 
     def _jump_to_locator(self, params, respond):
         cues = list(self._song_ref.cue_points)

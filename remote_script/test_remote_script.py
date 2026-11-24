@@ -668,17 +668,27 @@ class FakeTrack(ClipLane):
 class FakeCue(object):
     """time is read-only, as on Live's CuePoint."""
 
-    def __init__(self, time):
+    def __init__(self, time, song=None):
         self._time = time
         self.name = ""
+        self.song = song
 
     @property
     def time(self):
         return self._time
 
+    def jump(self):
+        self.song.move_playhead(self._time, snap=False)
+
 
 class FakeSong(object):
-    """With `lag`, transport and record changes land on the next tick, as in Live."""
+    """With `lag`, transport and record changes land on the next tick, as in Live.
+
+    Playhead moves always land on the next tick. With `snap` (in beats), a
+    stopped playhead written through current_song_time rounds to that grid, as
+    Live 12.4.6 was seen to do; `snap_jump_by` makes jump_by snap too.
+    CuePoint.jump lands exactly.
+    """
 
     def __init__(self, tracks):
         self.tracks = tracks
@@ -687,20 +697,46 @@ class FakeSong(object):
         self._record_mode = False
         self.arrangement_overdub = False
         self.is_playing = False
-        self.current_song_time = 0.0
+        self._time = 0.0
         self.started_from = None
         self.lag = False
         self.queued = []
+        self.moves = []
         self.cue_points = []
         self.drift = 0.0
+        self.snap = None
+        self.snap_jump_by = False
+
+    @property
+    def current_song_time(self):
+        return self._time
+
+    @current_song_time.setter
+    def current_song_time(self, value):
+        self.move_playhead(value, snap=True)
+
+    def move_playhead(self, value, snap):
+        if snap and self.snap and not self.is_playing:
+            value = round(value / self.snap) * self.snap
+        self.moves.append(lambda: setattr(self, "_time", float(value)))
+
+    def jump_by(self, beats):
+        self.move_playhead(self._time + beats, snap=self.snap_jump_by)
 
     def set_or_delete_cue(self):
         for cue in self.cue_points:
-            if abs(cue.time - self.current_song_time) < 1e-6:
+            if abs(cue.time - self._time) < 1e-6:
                 self.cue_points.remove(cue)
                 return
-        self.cue_points.append(FakeCue(self.current_song_time))
+        self.cue_points.append(FakeCue(self._time, self))
         self.cue_points.sort(key=lambda c: c.time)
+
+    def add_cue(self, time, name=""):
+        cue = FakeCue(float(time), self)
+        cue.name = name
+        self.cue_points.append(cue)
+        self.cue_points.sort(key=lambda c: c.time)
+        return cue
 
     def continue_playing(self):
         self.is_playing = True
@@ -712,6 +748,9 @@ class FakeSong(object):
             change()
 
     def apply_queued(self):
+        moves, self.moves = self.moves, []
+        for move in moves:
+            move()
         queued, self.queued = self.queued, []
         for change in queued:
             change()
@@ -757,7 +796,7 @@ class LiveSetScript(object):
         self.song.apply_queued()
         pending, self.pending = self.pending, []
         if self.song.is_playing:
-            self.song.current_song_time += self.song.drift
+            self.song._time += self.song.drift
         for fn in pending:
             fn()
 
@@ -769,6 +808,7 @@ class LiveSetScript(object):
             if responses:
                 break
             self.tick()
+        self.song.apply_queued()  # let a restored playhead land
         return responses[0]["ok"]
 
 
@@ -1389,7 +1429,7 @@ class CreateLocatorTests(unittest.TestCase):
     def test_a_playing_transport_is_paused_so_the_locator_lands_exactly(self):
         live = a_set()
         live.song.is_playing = True
-        live.song.current_song_time = 10.0
+        live.song._time = 10.0
         live.song.drift = 0.79
         result = self.create(live, {"time": 64.0, "name": "Drop"})
         self.assertEqual(result["time"], 64.0)
@@ -1401,7 +1441,7 @@ class CreateLocatorTests(unittest.TestCase):
 
     def test_a_stopped_transport_is_left_stopped_at_its_old_position(self):
         live = a_set()
-        live.song.current_song_time = 3.0
+        live.song._time = 3.0
         result = self.create(live, {"time": 8.0})
         self.assertEqual(result["time"], 8.0)
         self.assertNotIn("interrupted_playback", result)
@@ -1415,6 +1455,115 @@ class CreateLocatorTests(unittest.TestCase):
         live.song.cue_points.append(FakeCue(8.0))
         self.assertTrue(live.create_locator({"time": 8.0, "name": "A"})["renamed"])
 
+
+class LocatorPlayheadTests(unittest.TestCase):
+    """Issue #13: a stopped Live 12.4.6 playhead snapped beat 140 to 128."""
+
+    def run_deferred(self, live, call, params):
+        responses = []
+        result = call(params, responses.append)
+        self.assertIs(result, mcp.DEFERRED)
+        for _ in range(80):
+            if responses:
+                break
+            live.tick()
+        live.song.apply_queued()
+        self.assertEqual(len(responses), 1)
+        return responses[0]
+
+    def stopped_at_12(self, snap=None, snap_jump_by=False):
+        live = a_set()
+        live.song._time = 12.0
+        live.song.snap = snap
+        live.song.snap_jump_by = snap_jump_by
+        return live
+
+    def times(self, live):
+        return [c.time for c in live.song.cue_points]
+
+    def test_creates_exactly_at_the_target(self):
+        live = self.stopped_at_12()
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0, "name": "Drop"})
+        self.assertEqual(outcome["ok"]["time"], 140.0)
+        self.assertEqual(self.times(live), [140.0])
+        self.assertEqual(live.song.cue_points[0].name, "Drop")
+        self.assertEqual(live.song.current_song_time, 12.0)
+
+    def test_a_snapped_playhead_is_walked_onto_the_target_with_jump_by(self):
+        live = self.stopped_at_12(snap=32.0)
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0, "name": "Drop"})
+        self.assertEqual(outcome["ok"]["time"], 140.0)
+        self.assertEqual(self.times(live), [140.0])
+
+    def test_a_playhead_that_will_not_reach_the_target_toggles_nothing(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0})
+        self.assertIn("stopped on beat 128", outcome["error"])
+        self.assertIn("nothing was toggled", outcome["error"])
+        self.assertEqual(self.times(live), [])
+        self.assertFalse(live.song.is_playing)
+
+    def test_a_cue_created_elsewhere_is_deleted_again(self):
+        live = self.stopped_at_12()
+        real_toggle = live.song.set_or_delete_cue
+        calls = []
+
+        def misplaced_toggle():
+            calls.append(live.song._time)
+            if len(calls) == 1:
+                live.song.add_cue(128.0)
+            else:
+                real_toggle()
+
+        live.song.set_or_delete_cue = misplaced_toggle
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0})
+        self.assertIn("beat 128 instead of 140", outcome["error"])
+        self.assertIn("deleted again", outcome["error"])
+        self.assertEqual(self.times(live), [])
+        self.assertEqual(calls, [140.0, 128.0])
+
+    def test_playback_is_paused_and_resumed_around_the_toggle(self):
+        live = self.stopped_at_12(snap=32.0)
+        live.song.is_playing = True
+        live.song.drift = 0.5
+        outcome = self.run_deferred(live, live.create_locator, {"time": 140.0})
+        self.assertTrue(outcome["ok"]["interrupted_playback"])
+        self.assertEqual(self.times(live), [140.0])
+        self.assertTrue(live.song.is_playing)
+
+    def test_delete_jumps_to_the_cue_and_creates_nothing(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        live.song.add_cue(64.0, "A")
+        live.song.add_cue(140.0, "B")
+        outcome = self.run_deferred(live, live.delete_locator, {"index": 1})
+        self.assertEqual(outcome["ok"]["deleted"], "B")
+        self.assertEqual(self.times(live), [64.0])
+
+    def test_delete_refuses_when_the_playhead_cannot_reach_the_cue(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        cue = live.song.add_cue(140.0, "B")
+        cue.jump = lambda: None
+        outcome = self.run_deferred(live, live.delete_locator, {"index": 0})
+        self.assertIn("was not deleted", outcome["error"])
+        self.assertEqual(self.times(live), [140.0])
+
+    def test_clear_removes_only_the_range_and_creates_nothing(self):
+        live = self.stopped_at_12(snap=32.0, snap_jump_by=True)
+        for time in (4.0, 140.0, 268.0, 304.0):
+            live.song.add_cue(time)
+        outcome = self.run_deferred(live, live.clear_locators, {"from_time": 100.0})
+        self.assertEqual(outcome["ok"]["deleted_count"], 3)
+        self.assertEqual(self.times(live), [4.0])
+
+    def test_deleting_inside_a_batch_is_refused(self):
+        live = self.stopped_at_12()
+        live.song.add_cue(140.0)
+        with self.assertRaises(RuntimeError):
+            live.delete_locator({"index": 0})
+        with self.assertRaises(RuntimeError):
+            live.clear_locators({})
+        self.assertEqual(live.clear_locators({"to_time": 100.0})["deleted_count"], 0)
+        self.assertEqual(self.times(live), [140.0])
 
 # ── Set by displayed value ───────────────────────────────────────────────────
 
@@ -1639,7 +1788,7 @@ class MeterTests(unittest.TestCase):
 
     def test_probe_flags_what_enters_and_restores_the_playhead(self):
         live = metered_set()
-        live.song.current_song_time = 40.0
+        live.song._time = 40.0
         live.song.drift = 0.25
         responses = []
         result = live.probe_entry({"beat": 16, "preroll": 5, "after": 4}, responses.append)
@@ -1649,12 +1798,229 @@ class MeterTests(unittest.TestCase):
         self.assertEqual(report["rose"], [])
         self.assertEqual(report["tracks"][0]["name"], "Sub")
         self.assertTrue(report["tracks"][0]["entered"])
-        self.assertGreater(report["samples"]["before"], 10)
+        self.assertGreaterEqual(report["samples"]["before"], 10)
         self.assertGreater(report["samples"]["after"], 10)
         self.assertEqual(report["song_time"]["start"], 11.0)
         self.assertFalse(live.song.is_playing)
         self.assertEqual(live.song.current_song_time, 40.0)
         self.assertEqual(report["restored_to"], 40.0)
+
+
+class HoldingMeterTrack(FakeTrack):
+    """A meter like Live's: it catches every peak since the last read and falls
+    at `fall` per second (about what issue #3 measured), so short events smear
+    across the following samples."""
+
+    def __init__(self, name, signal, live, fall=0.35):
+        FakeTrack.__init__(self, name)
+        self.signal = signal
+        self.live = live
+        self.fall = fall
+        self.value = 0.0
+        self.read_at = None
+
+    @property
+    def output_meter_level(self):
+        song_time, clock = self.live.song.current_song_time, self.live.clock
+        if self.read_at is None:
+            span = [song_time]
+            elapsed = 0.0
+        else:
+            last_song, last_clock = self.read_at
+            elapsed = clock - last_clock
+            span = [song_time]
+            if self.live.song.is_playing and song_time > last_song:
+                steps = int((song_time - last_song) / 0.01)
+                span = [last_song + 0.01 * (i + 1) for i in range(steps)] + [song_time]
+        self.read_at = (song_time, clock)
+        self.value = max([self.value - self.fall * elapsed] +
+                         [self.signal(s) for s in span])
+        return self.value
+
+    @property
+    def output_meter_left(self):
+        return self.value
+
+    @property
+    def output_meter_right(self):
+        return self.value
+
+
+class ProbeMeterDecayTests(unittest.TestCase):
+    """Issue #3, as measured in Live 12.4.6 at 120 bpm around bar 70 (beat 276)."""
+
+    def probe(self, signals, params, playing_from=None, primed=None):
+        live = LiveSetScript([])
+        live.song.tempo = 120.0
+        live.song.drift = 0.2  # a tenth of a second at 120 bpm
+        live.song.tracks = [HoldingMeterTrack(name, signal, live)
+                            for name, signal in signals]
+        if playing_from is not None:
+            live.song.is_playing = True
+            live.song._time = playing_from
+        for track in live.song.tracks:
+            track.value = (primed or {}).get(track.name, 0.0)
+        responses = []
+        result = live.probe_entry(dict({"beat": 276.0}, **params), responses.append)
+        return live.settle(result, responses, ticks=200)
+
+    def track(self, report, name):
+        return next(t for t in report["tracks"] if t["name"] == name)
+
+    def test_a_meter_still_falling_from_before_the_jump_is_not_a_track_leaving(self):
+        # The kick fades out by bar 68, but the meter still holds what it played
+        # before the jump when the probe starts.
+        report = self.probe([("Kick", lambda t: 0.9 if t < 268 else 0.0),
+                             ("Bass", lambda t: 0.5)],
+                            {"preroll": 5}, playing_from=260.0, primed={"Kick": 0.9})
+        kick = self.track(report, "Kick")
+        self.assertGreaterEqual(kick["before_peak"], mcp.ENTRY_LOUD)  # what fooled the old rule
+        self.assertEqual(report["left"], [])
+        self.assertEqual(report["entered"] + report["rose"] + report["dipped"], [])
+
+    def test_a_one_bar_dropout_reads_as_a_dip(self):
+        clicks = lambda t: 0.0 if 276 <= t < 280 else (0.55 if (t * 2) % 1 < 0.1 else 0.4)
+        report = self.probe([("Clicks", clicks), ("Bass", lambda t: 0.5)],
+                            {"preroll": 5, "after": 6})
+        entry = self.track(report, "Clicks")
+        self.assertGreater(entry["before_min"], 0.3)
+        self.assertLess(entry["after_min"], 0.05)
+        self.assertEqual(report["dipped"], ["Clicks"])
+        self.assertGreaterEqual(entry["drop"]["beats"], 2)
+        self.assertEqual(report["left"], [])
+        beats = report["trace_beats"]
+        self.assertLess(entry["trace_peak"][beats.index(279)], 0.05)
+        self.assertGreater(entry["trace_peak"][beats.index(281)], 0.3)
+
+    def test_a_single_sparse_hit_is_not_a_rise(self):
+        snap = lambda t: 0.85 if 277.0 <= t < 277.05 else 0.0
+        report = self.probe([("Snap", snap), ("Bass", lambda t: 0.5)], {"preroll": 5})
+        entry = self.track(report, "Snap")
+        self.assertGreaterEqual(entry["after_peak"], 0.8)
+        self.assertGreaterEqual(entry["change"], mcp.ENTRY_RISE)  # what fooled the old rule
+        self.assertEqual(report["rose"] + report["entered"], [])
+
+    def test_a_real_entry_and_exit_still_register(self):
+        report = self.probe([("Lead", lambda t: 0.6 if t >= 276 else 0.0),
+                             ("Pad", lambda t: 0.6 if t < 276 else 0.0),
+                             ("Snap", lambda t: 0.7 if t >= 276 and (t % 1) < 0.1 else 0.0)],
+                            {"preroll": 5, "after": 6})
+        self.assertEqual(report["entered"], ["Lead", "Snap"])
+        self.assertEqual(report["left"], ["Pad"])
+
+    def test_a_slow_meter_dip_that_never_nears_silence_still_reads_as_a_dip(self):
+        # A 3-beat volume dropout on a ~0.8 track: the meter only falls to about 0.4.
+        chord = lambda t: 0.0 if 337 <= t < 339 else 0.8
+        live_beat = {"beat": 337.0, "preroll": 5, "after": 8}
+        report = self.probe([("Chord", chord), ("Bass", lambda t: 0.5)], live_beat)
+        entry = self.track(report, "Chord")
+        self.assertGreater(entry["after_min"], mcp.ENTRY_SILENT)
+        self.assertEqual(report["dipped"], ["Chord"])
+        self.assertEqual(report["left"] + report["entered"] + report["rose"], [])
+
+    def test_thresholds_and_windows_can_be_tuned(self):
+        snap = lambda t: 0.85 if 277.0 <= t < 277.05 else 0.0
+        report = self.probe([("Snap", snap)], {"preroll": 5, "persist": 0, "decay": 0.1})
+        self.assertEqual(report["entered"], ["Snap"])
+        self.assertEqual(report["options"]["persist"], 0)
+        live = LiveSetScript([])
+        live.song.tempo = 120.0
+        with self.assertRaises(ValueError):
+            live.probe_entry({"beat": 8, "silent": 0.5, "loud": 0.4}, lambda r: None)
+
+
+class RelativeDropTests(unittest.TestCase):
+    """Per-beat trace_min values measured in Live 12.4.6 (issue #3), from 5 beats
+    before the probed beat."""
+
+    def drop(self, mins, **options):
+        beats = list(range(332, 332 + len(mins)))
+        opts = mcp.AbletonMCP._probe_options(options)
+        return mcp.AbletonMCP._relative_drop(beats, mins, 337, opts)
+
+    def test_a_three_beat_dropout_a_beat_early_is_a_dip(self):
+        drop = self.drop([0.81, 0.81, 0.81, 0.402, 0.486, 0.802, 0.802, 0.802, 0.655, 0.555,
+                          0.841, 0.841, 0.841])
+        self.assertEqual(drop["kind"], "dipped")
+        self.assertEqual((drop["at"], drop["beats"], drop["reference"]), (335, 2, 0.81))
+
+    def test_a_two_beat_dropout_that_only_falls_a_quarter_is_a_dip(self):
+        drop = self.drop([0.594, 0.811, 0.811, 0.811, 0.854, 0.854, 0.854, 0.706, 0.607,
+                          0.845, 0.845, 0.845, 0.861])
+        self.assertEqual((drop["kind"], drop["at"], drop["beats"]), ("dipped", 340, 1))
+        self.assertIsNone(self.drop([0.594, 0.811, 0.811, 0.811, 0.854, 0.854, 0.854, 0.706,
+                                     0.607, 0.845, 0.845, 0.845, 0.861], dip_depth=0.35))
+
+    def test_a_fade_out_is_left_not_dipped(self):
+        drop = self.drop([0.685, 0.685, 0.685, 0.685, 0.241] + [0.0] * 8)
+        self.assertEqual((drop["kind"], drop["at"]), ("left", 336))
+
+    def test_quiet_sparse_and_steady_tracks_do_not_drop(self):
+        self.assertIsNone(self.drop([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.85, 0.5, 0.2, 0.0,
+                                     0.0, 0.0, 0.0]))
+        self.assertIsNone(self.drop([0.5, 0.52, 0.49, 0.5, 0.51, 0.5, 0.48, 0.5, 0.5, 0.52,
+                                     0.5, 0.5, 0.5]))
+
+    def test_a_pattern_that_already_gaps_before_the_beat_is_not_a_dip(self):
+        self.assertIsNone(self.drop([0.4, 0.0, 0.4, 0.4, 0.4, 0.4, 0.0, 0.4, 0.4, 0.4,
+                                     0.4, 0.4, 0.4]))
+
+    def test_a_meter_still_falling_after_the_jump_is_not_left(self):
+        self.assertIsNone(self.drop([0.775, 0.65, 0.525, 0.4, 0.275, 0.15, 0.025, 0.0, 0.0,
+                                     0.0, 0.0, 0.0, 0.0]))
+
+    def test_a_dip_too_long_before_the_beat_is_not_counted(self):
+        self.assertIsNone(self.drop([0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8,
+                                     0.8, 0.8]))
+        self.assertIsNone(self.drop([0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8,
+                                     0.8, 0.8], lag=0))
+        with self.assertRaises(ValueError):
+            mcp.AbletonMCP._probe_options({"dip_depth": 1.5})
+
+
+class GroupedMeterTests(unittest.TestCase):
+    """Live 12.4 reads 0 on the meters of tracks inside a group (issue #3)."""
+
+    def grouped_set(self):
+        live = metered_set()
+        group = MeteredTrack("Perc", lambda t: 0.61, live.song)
+        group.is_foldable = True
+        clicks = MeteredTrack("Clicks", lambda t: 0.0, live.song)
+        snap = MeteredTrack("Snap", lambda t: 0.0, live.song)
+        for track in (clicks, snap):
+            track.is_grouped = True
+            track.group_track = group
+        live.song.tracks = live.song.tracks + [group, clicks, snap]
+        return live
+
+    def test_get_meters_marks_grouped_tracks_and_notes_the_group_level(self):
+        live = self.grouped_set()
+        responses = []
+        report = live.settle(live.get_meters({"duration": 0.5}, responses.append),
+                             responses, ticks=30)
+        clicks = next(t for t in report["tracks"] if t["name"] == "Clicks")
+        self.assertEqual((clicks["grouped"], clicks["group"], clicks["meter"]),
+                         (True, "Perc", "unavailable"))
+        self.assertEqual([(g["name"], g["group"], g["group_avg"]) for g in report["grouped"]],
+                         [("Clicks", "Perc", 0.61), ("Snap", "Perc", 0.61)])
+        self.assertIn("group", report["note"])
+        keys = next(t for t in report["tracks"] if t["name"] == "Keys")
+        self.assertNotIn("grouped", keys)
+
+    def test_probe_never_reads_a_grouped_zero_as_silence(self):
+        live = self.grouped_set()
+        live.song.tracks[-1].level = lambda t: 0.5 if t < 16 else 0.0
+        live.song.drift = 0.25
+        responses = []
+        report = live.settle(live.probe_entry({"beat": 16}, responses.append),
+                             responses, ticks=200)
+        self.assertEqual(report["entered"], ["Sub"])
+        self.assertEqual(report["left"], ["Pad", "Snap"])
+        clicks = next(t for t in report["tracks"] if t["name"] == "Clicks")
+        self.assertEqual(clicks["meter"], "unavailable")
+        self.assertNotIn("change", clicks)
+        self.assertEqual([g["name"] for g in report["grouped"]], ["Clicks"])
+        self.assertTrue(next(t for t in report["tracks"] if t["name"] == "Snap")["grouped"])
 
 
 # ── Simpler samples ──────────────────────────────────────────────────────────

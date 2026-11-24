@@ -78,6 +78,14 @@ the API; to change it, rewrite the Session clip envelope and copy again.
 Parameters of devices nested inside racks are not scanned for envelopes.
 `get_device_parameters` reports each parameter's `automation_state`.
 
+**Locators.** Live can only toggle a locator at the playhead, and a stopped
+playhead can snap to the Arrangement grid (Live 12.4.6 put beat 140 on 128).
+The locator tools therefore toggle only once the playhead reads the exact
+beat, check afterwards that exactly the intended locator appeared or vanished,
+and delete any stray one again. When the beat cannot be reached they change
+nothing and name the beat the playhead reached; switching off Snap to Grid
+(Cmd-4) usually helps. A playing transport pauses for the few ticks this takes.
+
 **Analysis.** `analyze_harmony`, `analyze_arrangement` and `analyze_mix`
 compute from one session snapshot, server-side, so the large payload does not
 reach the model. They report measurements, not opinions:
@@ -109,8 +117,16 @@ display Live settled on and the error. `set_track_mixer` takes `volume_db` and
   by hand: a crate like `hound` reads WAV only, and AIFF would need hand-rolling
   anyway.
 - `get_meters` samples every track's output meter for a few seconds and
-  returns average and peak per track. `probe_entry` plays across a beat and
-  flags the tracks that enter there. Both sample inside the Remote Script, one
+  returns min, average and peak per track. `probe_entry` plays across a beat
+  and reports each track's before and after min, average and peak plus a
+  per-beat trace, flagging tracks that enter, rise, dip or leave. Because the
+  meters hold peaks and fall slowly (about 2 s from 0.8 to 0.1, the `decay`
+  default), an entry only counts when it lasts a beat beyond that decay (one
+  sparse hit is not an entry), and a short dropout never reaches silence, so a
+  dip is a fall of 20% (`dip_depth`) below the track's own usual per-beat
+  minimum that recovers; without recovery it is "left". Tracks inside a group
+  can read 0 while they play, so they are flagged `grouped`, given the group's
+  level and never called silent. The thresholds and windows are arguments. Both sample inside the Remote Script, one
   pass over every meter per Live tick (about 100 ms), spread across ticks so
   Live is never blocked. Levels are Live's 0 to 1 meter scale, not dBFS, and the
   meters hold peaks, so averages read high.
